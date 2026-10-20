@@ -11,19 +11,19 @@ WEIGHTS_DIR = PROJECT_ROOT / "weights"
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--video", type=Path)
-    parser.add_argument("--model", type=Path, default=WEIGHTS_DIR / "rf-detr-basketball.pth")
+    parser.add_argument("--model", type=Path, default=WEIGHTS_DIR / "checkpoint_best_total.pth")
     parser.add_argument("--pose-model", type=Path, default=WEIGHTS_DIR / "yolov8n-pose.pt")
     parser.add_argument("--reid-model", type=Path, default=WEIGHTS_DIR / "sports_model.pth.tar-60")
     parser.add_argument("--jersey-ocr-model", type=Path, default=WEIGHTS_DIR / "basketball_jersey_number.ckpt")
     parser.add_argument("--court-model", type=Path, default=WEIGHTS_DIR / "yolo26s-pose-court-33kp.pt")
     parser.add_argument("--output", type=Path, default=WORKSPACE_ROOT / 'output.mp4')
     parser.add_argument("--tracks", type=Path, default=WORKSPACE_ROOT / 'tracks.jsonl')
-    parser.add_argument("--player-threshold", type=float, default=0.41)
-    parser.add_argument("--ball-threshold", type=float, default=0.34)
-    parser.add_argument("--rim-threshold", type=float, default=0.5)
-    parser.add_argument("--holder-threshold", type=float, default=0.38)
-    parser.add_argument("--scorer-threshold", type=float, default=0.38)
-    parser.add_argument("--referee-threshold", type=float, default=0.54)
+    parser.add_argument("--player-threshold", type=float, default=0.44)
+    parser.add_argument("--ball-threshold", type=float, default=0.37)
+    parser.add_argument("--rim-threshold", type=float, default=0.71)
+    parser.add_argument("--holder-threshold", type=float, default=0.27)
+    parser.add_argument("--scorer-threshold", type=float, default=0.39)
+    parser.add_argument("--referee-threshold", type=float, default=0.39)
     parser.add_argument("--short-side", type=int, default=640)
     parser.add_argument("--track-buffer", type=int, default=30)
     parser.add_argument("--trail-length", type=int, default=16)
@@ -43,7 +43,9 @@ def main(args: argparse.Namespace | None = None) -> None:
     os.environ["LOG_LEVEL"] = "ERROR"
     from pipeline.video_analysis import VideoAnalysisRunner
 
-    VideoAnalysisRunner(_parse_args() if args is None else args).run()
+    args = _parse_args() if args is None else args
+    args.output = None if str(args.output).lower() == "none" else args.output
+    VideoAnalysisRunner(args).run()
 
 
 if __name__ == "__main__":

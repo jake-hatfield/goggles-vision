@@ -106,7 +106,7 @@ python main.py --video {your_video}.mp4
 
 ### Output Files
 
-- `--output` writes an annotated H.264 MP4. The default is `../output.mp4` when run from the project directory.
+- `--output` writes an annotated H.264 MP4. The default is `../output.mp4` when run from the project directory. Use `--output none` to skip all video rendering and writing while keeping analysis and JSONL output.
 - `--tracks` writes one JSON object per frame. The default is `../tracks.jsonl`.
 
 Each JSONL frame record uses the `basketball_frame_v2` schema and includes the frame number, timestamp, players, holder, ball and rim features, raw detections, and events. The first record also contains the run configuration. Event records use frame intervals and include event-specific fields such as shot result and points, pass receiver, or rebound type.

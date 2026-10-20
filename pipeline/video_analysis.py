@@ -28,8 +28,9 @@ from pipeline.context import (
 from pipeline.frame_events import FrameEventProcessor
 from pipeline.frame_features import FrameFeatureBuilder
 from pipeline.frame_observer import FrameObserver
-from pipeline.identity_finalization import finalize_identity_records
+from reid.consensus import reconcile_jersey_number_records
 from reid.jersey import JerseyNumberSampler
+from reid.records import assign_identity_labels, reconcile_identity_records
 from reid.resolver import IdentityResolver
 from render.frame import FrameRenderer
 from render.identity import rewrite_identity_overlay
@@ -74,6 +75,102 @@ def _same_path(first: Path, second: Path) -> bool:
         return os.path.samefile(first, second)
     except (FileNotFoundError, NotADirectoryError):
         return False
+
+
+def _save_records(tracks_path: Path, records: list[dict[str, Any]], resolver: Any) -> None:
+    tracks_tmp = tracks_path.with_name(tracks_path.name + ".tmp")
+    try:
+        with open(tracks_path, encoding="utf-8") as source, open(
+            tracks_tmp, "w", encoding="utf-8"
+        ) as destination:
+            record_count = 0
+            for index, line in enumerate(source):
+                if index >= len(records):
+                    raise ValueError("track records changed while resolving jersey numbers")
+                record = json.loads(line)
+                record["players"] = records[index].get("players", [])
+                if resolver.identity_aliases:
+                    reconcile_identity_records([record], resolver)
+                destination.write(json.dumps(record, ensure_ascii=False) + "\n")
+                record_count += 1
+            if record_count != len(records):
+                raise ValueError("track records changed while resolving jersey numbers")
+        os.replace(tracks_tmp, tracks_path)
+    except BaseException:
+        tracks_tmp.unlink(missing_ok=True)
+        raise
+
+
+def finalize_identity_records(
+    tracks_path: Path,
+    sampler: Any,
+    resolver: Any,
+    rewrite_overlay: Callable[..., None] | None,
+    label_for_player: Callable[[dict[str, Any]], str],
+) -> None:
+    """Reconcile cached jersey evidence, persist JSONL changes, and redraw when needed."""
+    has_identity_aliases = bool(resolver.identity_aliases)
+    records: list[dict[str, Any]] = []
+    initial_states: dict[tuple[int, Any, int], tuple[bool, Any, str, tuple[Any, Any]]] = {}
+    history_label_changed = False
+    reconciled_observations = 0
+
+    with open(tracks_path, encoding="utf-8") as track_file:
+        for record_index, line in enumerate(track_file):
+            source_record = json.loads(line)
+            record = {
+                "frame": source_record.get("frame", record_index + 1),
+                "players": source_record.get("players", []),
+            }
+            frame_index = int(record["frame"])
+            for player_index, player in enumerate(record["players"]):
+                player.setdefault("jersey_number_candidate", player.get("jersey_number"))
+                player.setdefault("jersey_number_locked", player.get("jersey_number") is not None)
+                key = (frame_index, player.get("local_track_id"), player_index)
+                initial_states[key] = (
+                    bool(player["jersey_number_locked"]),
+                    player.get("identity_label"),
+                    label_for_player(player),
+                    (player.get("team"), player.get("team_semantic")),
+                )
+
+            if has_identity_aliases:
+                reconciled_observations += reconcile_identity_records([record], resolver)
+                assign_identity_labels([record])
+                for player_index, player in enumerate(record.get("players", ())):
+                    key = (frame_index, player.get("local_track_id"), player_index)
+                    initial = initial_states[key]
+                    history_label_changed |= (
+                        initial[2] != label_for_player(player)
+                        or initial[3] != (player.get("team"), player.get("team_semantic"))
+                    )
+            records.append(record)
+
+    if has_identity_aliases:
+        print(
+            f"ReID history reconciliation: {reconciled_observations} player observations across "
+            f"{resolver.identity_relink_count} relinks"
+        )
+
+    result = reconcile_jersey_number_records(
+        records,
+        sampler.predictions,
+        sampler.digit_predictions,
+        initial_states,
+    )
+    changed = bool(result.added or result.corrected or result.demoted or result.status_changed)
+    if not changed and not has_identity_aliases:
+        print(f"jersey track consensus: {result.labeled}/{result.total_players} labeled")
+        return
+
+    _save_records(tracks_path, records, resolver)
+    if rewrite_overlay is not None and (changed or history_label_changed):
+        previous_overlay_labels = {key: state[2] for key, state in initial_states.items()}
+        rewrite_overlay(records, previous_overlay_labels)
+    print(
+        f"jersey track consensus: {result.labeled}/{result.total_players} labeled; "
+        f"added={result.added}, corrected={result.corrected}, ambiguous labels demoted={result.demoted}"
+    )
 
 
 def _print_video_summary(run: VideoAnalysisContext) -> None:
@@ -141,7 +238,7 @@ def _print_video_summary(run: VideoAnalysisContext) -> None:
 class FrameArtifactWriter:
     """Keep annotated video frames and their JSONL records in sync."""
 
-    def __init__(self, video_writer: FfmpegVideoWriter, track_file: TextIO) -> None:
+    def __init__(self, video_writer: FfmpegVideoWriter | None, track_file: TextIO) -> None:
         self.video_writer = video_writer
         self.track_file = track_file
         self.last_frame_record: dict | None = None
@@ -159,12 +256,14 @@ class FrameArtifactWriter:
         make_fps_label: Callable[[], str],
         draw_status: Callable[[np.ndarray, str], None],
     ) -> None:
-        self.last_render_base = frame.copy()
-        self.last_frame_time = frame_time
-        draw_scoreboard(frame)
         if self.last_frame_record is not None:
             self.track_file.write(json.dumps(self.last_frame_record, ensure_ascii=False) + "\n")
         self.last_frame_record = frame_record
+        if self.video_writer is None:
+            return
+        self.last_render_base = frame.copy()
+        self.last_frame_time = frame_time
+        draw_scoreboard(frame)
         fps_label = make_fps_label()
         draw_status(frame, fps_label)
         self.last_fps_label = fps_label
@@ -187,13 +286,13 @@ class VideoAnalysisRunner:
     def __init__(self, args: Any) -> None:
         configure_runtime()
         video_path = Path(args.video).expanduser().resolve()
-        output_path = Path(args.output).expanduser().resolve()
+        output_path = Path(args.output).expanduser().resolve() if args.output is not None else None
         tracks_path = Path(args.tracks).expanduser().resolve()
-        if _same_path(video_path, output_path):
+        if output_path is not None and _same_path(video_path, output_path):
             raise ValueError("--output must not refer to the input video")
         if _same_path(video_path, tracks_path):
             raise ValueError("--tracks must not refer to the input video")
-        if _same_path(output_path, tracks_path):
+        if output_path is not None and _same_path(output_path, tracks_path):
             raise ValueError("--tracks must not refer to the output video")
         if args.max_frames is not None and args.max_frames < 0:
             raise ValueError("--max-frames must be non-negative")
@@ -231,11 +330,13 @@ class VideoAnalysisRunner:
         total_frames = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
         resolver_device = f"cuda:{device}" if isinstance(device, int) else device
         player_tracker = make_tracker(fps, args)
-        writer = FfmpegVideoWriter(args.output, fps, (width, height))
-        self._writer_cleanup.callback(writer.release)
-        if not writer.is_opened():
-            raise RuntimeError(f"cannot write video: {args.output}")
-        court_map = CourtMiniMap(width, height)
+        writer = None
+        if args.output is not None:
+            writer = FfmpegVideoWriter(args.output, fps, (width, height))
+            self._writer_cleanup.callback(writer.release)
+            if not writer.is_opened():
+                raise RuntimeError(f"cannot write video: {args.output}")
+        court_map = CourtMiniMap(width, height) if writer is not None else None
         ball_tracker = ShotBallTracker(fps, args.trail_length)
         holder_state = HolderState(args.holder_hold_frames)
         identity_resolver = IdentityResolver({"weights": str(args.reid_model)}, fps, resolver_device, team_classifier)
@@ -301,7 +402,7 @@ class VideoAnalysisRunner:
         self.observer = FrameObserver(state)
         self.feature_builder = FrameFeatureBuilder(state)
         self.event_processor = FrameEventProcessor(state)
-        self.renderer = FrameRenderer(court_map)
+        self.renderer = FrameRenderer(court_map) if writer is not None else None
 
     def close(self) -> None:
         """Release all resources, including those opened before a setup error."""
@@ -327,7 +428,7 @@ class VideoAnalysisRunner:
                     if state.team_classifier.team_colors_locked
                     else None
                 ),
-                right_clearance=state.width - state.court_map.margin - state.court_map.width,
+                right_clearance=state.width - state.court_map.margin - state.court_map.width if state.court_map else 0,
             ),
             lambda: f"{state.frame_index / max(time.perf_counter() - state.start_time, 1e-06):.1f} FPS",
             partial(draw_fps_and_event_status, event=result.event_display),
@@ -354,7 +455,7 @@ class VideoAnalysisRunner:
                     if state.team_classifier.team_colors_locked
                     else None
                 ),
-                right_clearance=state.width - state.court_map.margin - state.court_map.width,
+                right_clearance=state.width - state.court_map.margin - state.court_map.width if state.court_map else 0,
                 fps_label=output.last_fps_label or "",
                 event_display=result.event_display,
             )
@@ -371,8 +472,9 @@ class VideoAnalysisRunner:
             self.feature_builder.build_rim_feature(frame_context)
             self.feature_builder.build_frame_features(frame, frame_context)
             result = self.event_processor.process_frame(frame_context)
-            self.renderer.draw_rim(frame, frame_context)
-            self.renderer.draw_frame(frame, frame_context)
+            if self.renderer is not None:
+                self.renderer.draw_rim(frame, frame_context)
+                self.renderer.draw_frame(frame, frame_context)
             self._write_frame(frame, result)
             state.progress.update(1)
         state.frame_processing_elapsed = time.perf_counter() - state.start_time
@@ -400,7 +502,7 @@ class VideoAnalysisRunner:
                 state.args.output,
                 state.fps,
                 state.team_classifier.team_colors,
-            ),
+            ) if state.writer is not None else None,
             label_for_player=player_overlay_label,
         )
         _print_video_summary(state)
