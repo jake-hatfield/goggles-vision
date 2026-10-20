@@ -283,6 +283,9 @@ class JerseyTeamClassifier:
         descriptor = history[-1][0]
         return int(np.argmin(np.linalg.norm(self.centers - descriptor[None, :], axis=1)))
 
+    def predict_raw_color_track(self, track_id: int) -> int | None:
+        return self._raw_predict_identity_track(track_id)
+
     def _raw_predict_identity_track(self, track_id):
         history = self.color_history.get(int(track_id))
         if not history or self.identity_centers is None:

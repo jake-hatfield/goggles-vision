@@ -218,7 +218,7 @@ class PossessionEventDetector:
         is_steal = self._direct_steal_supported(
             previous_box, previous_ball_position, player, self.candidate_ball_position
         )
-        events = [{
+        return [{
             "event": "turnover",
             **interval,
             "player_id": previous_holder,
@@ -228,16 +228,6 @@ class PossessionEventDetector:
             "cause": "steal" if is_steal else "unknown",
             "evidence": "stable_opponent_control_with_visible_ball",
         }]
-        if is_steal:
-            events.append({
-                "event": "steal",
-                **interval,
-                "player_id": self.last_holder,
-                "team": team,
-                "turnover_player_id": previous_holder,
-                "evidence": "visible_ball_transfer_during_close_opponent_contest",
-            })
-        return events
 
     @classmethod
     def _direct_steal_supported(cls, previous_box, previous_ball, player, current_ball):

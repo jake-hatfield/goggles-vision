@@ -205,7 +205,7 @@ class SportsReIDEncoder:
             checkpoint = torch.load(
                 self.weights,
                 map_location="cpu",
-                weights_only=True,
+                weights_only=False,
             )
             if not isinstance(checkpoint, dict):
                 raise RuntimeError("sports ReID checkpoint must contain a state dictionary")

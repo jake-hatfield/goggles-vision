@@ -19,6 +19,9 @@ from tracking.ball import DetectionBox
 from tracking.court import is_player_on_court
 
 
+COURT_REACQUIRE_INTERVAL_FRAMES = 3
+
+
 class FrameObserver:
 
     def __init__(self, state: VideoAnalysisContext) -> None:
@@ -61,21 +64,28 @@ class FrameObserver:
             self.state.player_states.setdefault(track_id, PlayerState())
         return visible_tracks, visible_by_id
 
-    def schedule_inference(self, frame: np.ndarray, frame_index: int) -> tuple[object, object]:
+    def schedule_inference(self, frame: np.ndarray, frame_index: int) -> tuple[object, object, bool]:
         """Submit frame-independent pose and court inference ahead of detector work."""
+        court_interval = self.state.args.court_interval
+        # In batched mode this may be called several frames ahead. The mapper
+        # cannot advance until those frames are observed, so base the interval
+        # decision on the latest processed frame rather than the future index.
+        if not self.state.court_mapper.is_recent(self.state.frame_index):
+            court_interval = min(court_interval, COURT_REACQUIRE_INTERVAL_FRAMES)
+        court_scheduled = (frame_index - 1) % court_interval == 0
         court_future = None
-        if (frame_index - 1) % self.state.args.court_interval == 0:
+        if court_scheduled:
             court_future = self.state.court_pose.submit(frame)
         pose_future = None
         if (frame_index - 1) % self.state.args.pose_interval == 0:
             pose_future = self.state.player_pose.submit(frame)
-        return pose_future, court_future
+        return pose_future, court_future, court_scheduled
 
     def observe_frame(
         self,
         frame: np.ndarray,
         detector_detections: tuple[Any, Any, Any, Any, Any, Any, Any] | None = None,
-        inference_futures: tuple[object, object] | None = None,
+        inference_futures: tuple[object, object, bool] | None = None,
     ) -> FrameContext:
         if self.state.identity_resolver.detect_clip_cut(frame, self.state.frame_index):
             self.state.ball_tracker.reset()
@@ -99,7 +109,7 @@ class FrameObserver:
                 state.court_frame = -(10**9)
         if inference_futures is None:
             inference_futures = self.schedule_inference(frame, self.state.frame_index)
-        pose_future, court_future = inference_futures
+        pose_future, court_future, court_scheduled = inference_futures
         pose_scheduled = (self.state.frame_index - 1) % self.state.args.pose_interval == 0
         if detector_detections is None:
             if self.state.detector_shape is None:
@@ -147,14 +157,22 @@ class FrameObserver:
             detection_index = -detection_id - 1
             tracker_pose_points[detection_index] = points
             tracker_pose_scores[detection_index] = scores
-        all_visible_tracks = detection_tracks(
-            self.state.player_tracker.update(
-                players,
-                frame=frame,
-                pose_data=(tracker_pose_points, tracker_pose_scores),
-            ),
-            tracked=True,
+        cmc = getattr(self.state.player_tracker, "cmc", None)
+        force_cmc = getattr(cmc, "force_next_estimate", None)
+        if court_scheduled and callable(force_cmc):
+            force_cmc()
+        tracked_players = self.state.player_tracker.update(
+            players,
+            frame=frame,
+            pose_data=(tracker_pose_points, tracker_pose_scores),
         )
+        if cmc is not None and cmc.last_warp_valid:
+            self.state.court_mapper.update_camera_motion(
+                cmc.last_warp,
+                getattr(cmc, "last_warp_source_frame", None),
+                self.state.frame_index,
+            )
+        all_visible_tracks = detection_tracks(tracked_players, tracked=True)
         pose_matches = match_pose_to_players(
             all_visible_tracks, pose_boxes, pose_points, pose_scores, self.state.iou_metric
         )
@@ -190,7 +208,8 @@ class FrameObserver:
         visible_tracks, visible_by_id = self._refresh_visible_players(
             all_visible_tracks, all_active_by_id, referee_track_ids, pose_matches, frame.shape
         )
-        if (self.state.frame_index - 1) % self.state.args.court_interval == 0:
+        mapping_updated = False
+        if court_scheduled:
             court_points, court_scores = self.state.court_pose.result(court_future, frame)
             continuity_data = []
             for track in visible_tracks:
@@ -212,21 +231,17 @@ class FrameObserver:
                         + 12.0 * court_age,
                     )
                 )
-            if self.state.court_mapper.update(
+            mapping_updated = self.state.court_mapper.update(
                 court_points,
                 court_scores,
                 self.state.frame_index,
                 frame.shape,
                 continuity_data,
-            ):
-                self.state.court_mapper.refine(
-                    frame,
-                    self.state.frame_index,
-                    (track.box for track in visible_tracks),
-                )
-                visible_tracks, visible_by_id = self._refresh_visible_players(
-                    all_visible_tracks, all_active_by_id, referee_track_ids, pose_matches, frame.shape
-                )
+            )
+        if mapping_updated:
+            visible_tracks, visible_by_id = self._refresh_visible_players(
+                all_visible_tracks, all_active_by_id, referee_track_ids, pose_matches, frame.shape
+            )
         active_by_id = {
             track_id: track
             for track_id, track in all_active_by_id.items()

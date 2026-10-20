@@ -11,6 +11,7 @@ from reid.records import assign_identity_labels
 PlayerRow = dict[str, Any]
 PlayerSegment = list[tuple[int, PlayerRow]]
 Record = dict[str, Any]
+LOCAL_TRACK_SEGMENT_MAX_GAP = 8
 
 
 @dataclass(frozen=True)
@@ -167,7 +168,7 @@ def reconcile_jersey_number_records(
             previous_id = previous[1].get("id") if previous else None
             global_id = player.get("id")
             if previous and (
-                frame_index - previous[0] > 8
+                frame_index - previous[0] > LOCAL_TRACK_SEGMENT_MAX_GAP
                 or (previous_id is not None and global_id is not None and previous_id != global_id)
             ):
                 segments.extend(_split_on_jersey_color(segment))
@@ -537,4 +538,8 @@ def reconcile_jersey_number_records(
     )
 
 
-__all__ = ["JerseyConsensusResult", "reconcile_jersey_number_records"]
+__all__ = [
+    "JerseyConsensusResult",
+    "LOCAL_TRACK_SEGMENT_MAX_GAP",
+    "reconcile_jersey_number_records",
+]

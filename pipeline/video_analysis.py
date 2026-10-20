@@ -16,6 +16,7 @@ from rfdetr import from_checkpoint
 from tqdm import tqdm
 
 from events.detector import BallEventPipeline
+from events.serialization import write_event_list
 from models.court import CourtPoseDetector
 from models.detectors import detect_batch, predict_shape, resolve_detector_class_ids
 from models.jersey_number import JerseyNumberReader
@@ -179,6 +180,19 @@ def _print_video_summary(run: VideoAnalysisContext) -> None:
     print(f"runtime events: {run.event_count}; shot reminders: {run.reminder_count}; scoreboard: {run.scores}")
     print(f"output: {run.args.output}")
     print(f"tracks: {run.args.tracks}")
+    court_mapper = run.court_mapper
+    rejection_summary = ", ".join(
+        f"{reason}={count}"
+        for reason, count in sorted(
+            court_mapper.model_update_rejections.items(),
+            key=lambda item: (-item[1], item[0]),
+        )[:5]
+    ) or "none"
+    print(
+        "court mapping: "
+        f"keypoint updates={court_mapper.model_update_acceptances}/{court_mapper.model_update_attempts}, "
+        f"rejections={rejection_summary}"
+    )
     if run.team_classifier.team_colors is not None:
         print(f"team colors (BGR): {run.team_classifier.team_colors}; locked={run.team_classifier.team_colors_locked}")
     cmc = getattr(run.player_tracker, "cmc", None)
@@ -288,12 +302,16 @@ class VideoAnalysisRunner:
         video_path = Path(args.video).expanduser().resolve()
         output_path = Path(args.output).expanduser().resolve() if args.output is not None else None
         tracks_path = Path(args.tracks).expanduser().resolve()
+        events_path = Path(args.events).expanduser().resolve()
         if output_path is not None and _same_path(video_path, output_path):
             raise ValueError("--output must not refer to the input video")
         if _same_path(video_path, tracks_path):
             raise ValueError("--tracks must not refer to the input video")
         if output_path is not None and _same_path(output_path, tracks_path):
             raise ValueError("--tracks must not refer to the output video")
+        if any(path is not None and _same_path(events_path, path) for path in (video_path, tracks_path, output_path)):
+            raise ValueError("--events must not refer to the input, tracks, or output file")
+        args.events = events_path
         if args.max_frames is not None and args.max_frames < 0:
             raise ValueError("--max-frames must be non-negative")
 
@@ -554,10 +572,13 @@ class VideoAnalysisRunner:
                 state.args.video,
                 state.args.output,
                 state.fps,
-                state.team_classifier.team_colors,
+                state.team_classifier.team_colors if state.team_classifier.team_colors_locked else None,
+                player_box_colors=self.renderer.player_box_colors,
             ) if state.writer is not None else None,
             label_for_player=player_overlay_label,
         )
+        event_count = write_event_list(state.args.tracks, state.args.events)
+        print(f"event list: {state.args.events} ({event_count} events)")
         _print_video_summary(state)
 
 

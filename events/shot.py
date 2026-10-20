@@ -128,6 +128,12 @@ class ShotOutcomeResolver:
         }
         if points is not None:
             event["points"] = points
+        location = shot.get("release_court_xy")
+        if location is not None:
+            event["location"] = [round(float(value), 3) for value in location[:2]]
+            shot_value = shot_point_value(location)
+            if shot_value is not None:
+                event["shot_value"] = shot_value
         event["score_applied"] = False
         return event
 

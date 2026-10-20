@@ -1,7 +1,7 @@
 import numpy as np
 
 from pipeline.context import FrameContext, VideoAnalysisContext
-from tracking.court import update_court_state
+from tracking.court import COURT_MAP_MAX_AGE_FRAMES, update_court_state
 from tracking.team import normalize_team
 
 
@@ -38,9 +38,10 @@ class FrameFeatureBuilder:
             ctx.rim_overlay_score = float(ctx.rims.confidence[best_rim])
 
     def build_frame_features(self, frame: np.ndarray, ctx: FrameContext) -> FrameContext:
-        map_stale_frames = max(
-            3,
-            round(0.3 * self.state.fps),
+        team_colors = (
+            self.state.team_classifier.team_colors
+            if self.state.team_classifier.team_colors_locked
+            else None
         )
         ctx.player_box_colors.clear()
         ctx.display_box_colors.clear()
@@ -58,8 +59,8 @@ class FrameFeatureBuilder:
             team_id = self.state.team_classifier.predict_track(track_id) if reid_eligible else None
             team_color = (
                 None
-                if team_id is None or self.state.team_classifier.team_colors is None
-                else self.state.team_classifier.team_colors[team_id]
+                if team_id is None or team_colors is None
+                else team_colors[team_id]
             )
             if team_color is not None:
                 state.color = tuple(map(int, team_color))
@@ -69,7 +70,8 @@ class FrameFeatureBuilder:
             )
             court_fresh = (
                 state.court_position is not None
-                and self.state.frame_index - state.court_frame <= 5
+                and self.state.frame_index - state.court_frame <= COURT_MAP_MAX_AGE_FRAMES
+                and self.state.court_mapper.is_recent(self.state.frame_index)
             )
             court_xy = (
                 None
@@ -161,14 +163,13 @@ class FrameFeatureBuilder:
                 if eligible_for_reid
                 else f"R{local_id}"
             )
-            if team_id is not None and self.state.team_classifier.team_colors is not None:
-                box_color = tuple(map(int, self.state.team_classifier.team_colors[team_id]))
+            if team_id is not None and team_colors is not None:
+                box_color = tuple(map(int, team_colors[team_id]))
             ctx.player_box_colors[local_id] = box_color
             ctx.feature_players.append(player_feature)
         for track in ctx.display_only_tracks:
             identity_label = f"R{track.track_id}"
             team_id = self.state.team_classifier.predict_track(track.track_id)
-            team_colors = self.state.team_classifier.team_colors
             box_color = (
                 tuple(map(int, team_colors[team_id]))
                 if team_id is not None and team_colors is not None
@@ -197,20 +198,36 @@ class FrameFeatureBuilder:
             if track_id not in ctx.active_ids:
                 del self.state.player_states[track_id]
         ctx.map_entries = []
+        jersey_numbers = {
+            int(player["local_track_id"]): player.get("jersey_number")
+            for player in ctx.feature_players
+        }
         for track_id, state in sorted(self.state.player_states.items()):
             if (
                 track_id not in ctx.visible_by_id
                 or state.court_position is None
-                or self.state.frame_index - state.court_frame > map_stale_frames
+                or self.state.frame_index - state.court_frame > COURT_MAP_MAX_AGE_FRAMES
+                or not self.state.court_mapper.is_recent(self.state.frame_index)
             ):
                 continue
             entry = {
                 "track_id": track_id,
                 "court_xy": state.court_position,
                 "holder": self.state.holder_state.active(track_id, self.state.frame_index),
+                "jersey_number": jersey_numbers.get(track_id),
             }
-            if state.color is not None:
-                entry["color"] = state.color
+            team_id = (
+                self.state.identity_resolver.get_team_id(track_id)
+                if track_id in ctx.reid_track_ids else None
+            )
+            if team_id is None:
+                team_id = self.state.team_classifier.predict_track(track_id)
+            if team_id is None:
+                team_id = self.state.team_classifier.predict_raw_track(track_id)
+            if team_id is not None and team_colors is not None:
+                entry["team_semantic"] = normalize_team(team_id)
+                entry["color"] = tuple(map(int, team_colors[team_id]))
+                ctx.player_box_colors[track_id] = entry["color"]
             ctx.map_entries.append(entry)
         ctx.holder_id = (
             None

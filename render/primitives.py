@@ -94,7 +94,7 @@ def draw_box(frame: np.ndarray, box, label: str, draw_color, style: str = "playe
         frame,
         label,
         origin,
-        cv2.FONT_HERSHEY_SIMPLEX,
+        cv2.FONT_HERSHEY_DUPLEX,
         font_scale,
         draw_color,
         thickness,

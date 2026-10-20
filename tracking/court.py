@@ -11,6 +11,7 @@ from tracking.pose import get_player_ground_point, validated_pose
 COURT_KEYPOINT_COUNT = 33
 COURT_LENGTH_M = 28.65
 COURT_WIDTH_M = 15.24
+COURT_MAP_MAX_AGE_FRAMES = 5
 COURT_GEOMETRY = {
     "lane_half_width_m": 2.44,
     "baseline_offset_m": 0.91,
@@ -149,7 +150,7 @@ def default_nba_court_vertices() -> np.ndarray:
 
 
 class CourtMapper:
-    """Estimate and refine a stable image-to-court homography across frames."""
+    """Estimate a stable image-to-court homography across frames."""
 
     def __init__(self, vertices: np.ndarray, max_pending_gap: int | None = None) -> None:
         self.vertices = np.asarray(vertices, dtype=np.float32)
@@ -162,7 +163,12 @@ class CourtMapper:
         self.max_pending_gap = max(1, int(max_pending_gap))
         self.homography = None
         self.last_valid_frame = -(10**9)
+        self.last_keypoint_frame = -(10**9)
+        self.last_camera_motion_frame = -(10**9)
         self.last_stats = self._stats("uninitialized")
+        self.model_update_attempts = 0
+        self.model_update_acceptances = 0
+        self.model_update_rejections = {}
         self.court_min = self.vertices.min(axis=0)
         self.court_max = self.vertices.max(axis=0)
         anchors = np.asarray(
@@ -171,16 +177,14 @@ class CourtMapper:
         )
         self.anchor_points = anchors * np.asarray((COURT_LENGTH_M, COURT_WIDTH_M), np.float32)
         self.pending = None
-        self.line_warp = np.eye(3, dtype=np.float64)
-        self.last_refine_frame = -(10**9)
 
     def reset(self) -> None:
         self.homography = None
         self.last_valid_frame = -(10**9)
+        self.last_keypoint_frame = -(10**9)
+        self.last_camera_motion_frame = -(10**9)
         self.last_stats = self._stats("uninitialized")
         self.pending = None
-        self.line_warp = np.eye(3, dtype=np.float64)
-        self.last_refine_frame = -(10**9)
 
     @staticmethod
     def _stats(
@@ -201,6 +205,7 @@ class CourtMapper:
     def _reject(self, reason, **updates):
         self.last_stats["reason"] = reason
         self.last_stats.update(updates)
+        self.model_update_rejections[reason] = self.model_update_rejections.get(reason, 0) + 1
         return False
 
     @staticmethod
@@ -211,21 +216,44 @@ class CourtMapper:
         projected = cv2.perspectiveTransform(np.asarray(points, np.float32).reshape(-1, 1, 2), inverse).reshape(-1, 2)
         return projected if np.isfinite(projected).all() else None
 
-    @staticmethod
-    def _is_direction_flip(current_anchors, previous_anchors):
-        direct_shift = float(np.median(np.linalg.norm(current_anchors - previous_anchors, axis=1)))
-        orders = [[1, 0, 3, 2, 4, 6, 5], [2, 3, 0, 1, 4, 6, 5]]
-        flipped_shift = min(
-            float(np.median(np.linalg.norm(current_anchors - previous_anchors[list(order)], axis=1)))
-            for order in orders
+    @classmethod
+    def _is_direction_flip(cls, current_anchors, previous_anchors, frame_shape):
+        visible = cls._visible_anchor_mask(current_anchors, previous_anchors, frame_shape)
+        compared = visible if int(visible.sum()) >= 2 else np.ones(len(current_anchors), dtype=bool)
+        direct_shift = float(
+            np.median(np.linalg.norm(current_anchors[compared] - previous_anchors[compared], axis=1))
         )
+        orders = ([1, 0, 3, 2, 4, 6, 5], [2, 3, 0, 1, 4, 6, 5])
+        flipped_shifts = []
+        for order in orders:
+            flipped_anchors = previous_anchors[list(order)]
+            flipped_visible = cls._visible_anchor_mask(current_anchors, flipped_anchors, frame_shape)
+            flipped_compared = (
+                flipped_visible
+                if int(flipped_visible.sum()) >= 2
+                else np.ones(len(current_anchors), dtype=bool)
+            )
+            flipped_shifts.append(
+                float(
+                    np.median(
+                        np.linalg.norm(
+                            current_anchors[flipped_compared] - flipped_anchors[flipped_compared],
+                            axis=1,
+                        )
+                    )
+                )
+            )
+        flipped_shift = min(flipped_shifts)
         return flipped_shift + 25.0 < direct_shift
 
     def _confirm_reacquire(self, anchors, frame_index, frame_shape):
         confirmations = 1
         if self.pending is not None:
             previous, previous_frame, previous_count = self.pending
-            shift = np.linalg.norm(np.asarray(anchors) - previous, axis=1)
+            anchors = np.asarray(anchors, dtype=np.float32)
+            visible = self._visible_anchor_mask(anchors, previous, frame_shape)
+            compared = visible if int(visible.sum()) >= 2 else np.ones(len(anchors), dtype=bool)
+            shift = np.linalg.norm(anchors[compared] - previous[compared], axis=1)
             scale = max(frame_shape[:2])
             consistent = frame_index - previous_frame <= self.max_pending_gap and np.isfinite(shift).all()
             consistent &= np.median(shift) <= max(
@@ -243,6 +271,22 @@ class CourtMapper:
             self.pending = None
         return confirmed
 
+    @staticmethod
+    def _visible_anchor_mask(current, previous, frame_shape):
+        height, width = frame_shape[:2]
+        margin_x = 0.05 * width
+        margin_y = 0.05 * height
+
+        def inside(points):
+            return (
+                (points[:, 0] >= -margin_x)
+                & (points[:, 0] <= width + margin_x)
+                & (points[:, 1] >= -margin_y)
+                & (points[:, 1] <= height + margin_y)
+            )
+
+        return inside(np.asarray(current)) | inside(np.asarray(previous))
+
     def update(
         self,
         keypoints: np.ndarray | None,
@@ -253,9 +297,11 @@ class CourtMapper:
     ) -> bool:
         """Update the homography from one court-keypoint observation."""
         frame_index = int(frame_index)
+        map_was_recent = self.is_recent(frame_index)
+        self.model_update_attempts += 1
         self.last_stats = self._stats("no_input")
         if keypoints is None or scores is None:
-            return False
+            return self._reject("no_input")
         keypoints = np.asarray(keypoints, dtype=np.float32)
         scores = np.asarray(scores, dtype=np.float32).reshape(-1)
         if (
@@ -272,7 +318,7 @@ class CourtMapper:
         court_points = self.vertices[valid]
         self.last_stats = self._stats("too_few_points", len(image_points))
         if len(image_points) < 6:
-            return False
+            return self._reject("too_few_points", valid=len(image_points))
         frame_area = max(1.0, float(width * height))
         if (
             abs(float(cv2.contourArea(cv2.convexHull(image_points))))
@@ -313,20 +359,22 @@ class CourtMapper:
             np.abs(anchors) > 8.0 * max(height, width)
         ):
             return self._reject("unstable_anchor_projection")
-        frame_gap = frame_index - self.last_valid_frame
-        reacquired = self.homography is None or frame_gap > 5
+        keypoint_gap = frame_index - self.last_keypoint_frame
+        reacquired = self.homography is None or not map_was_recent
         previous = (
             None if self.homography is None else self._project_court_to_image(self.homography, self.anchor_points)
         )
         if self.homography is not None and previous is None:
             self.pending = None
             return self._reject("invalid_previous_anchor_projection")
-        if previous is not None and not reacquired and self._is_direction_flip(anchors, previous):
+        if previous is not None and not reacquired and self._is_direction_flip(anchors, previous, frame_shape):
             self.pending = None
             return self._reject("direction_flip")
-        if previous is not None and 0 <= frame_gap <= 5:
-            shift = np.linalg.norm(anchors - previous, axis=1)
-            limit = 25.0 * max(1, frame_gap)
+        if previous is not None and 0 <= keypoint_gap <= 5:
+            visible = self._visible_anchor_mask(anchors, previous, frame_shape)
+            compared = visible if int(visible.sum()) >= 2 else np.ones(len(anchors), dtype=bool)
+            shift = np.linalg.norm(anchors[compared] - previous[compared], axis=1)
+            limit = 25.0 * max(1, keypoint_gap)
             if (
                 not np.isfinite(shift).all()
                 or np.median(shift) > limit
@@ -358,14 +406,63 @@ class CourtMapper:
             return self._reject("awaiting_reacquire")
         if not reacquired or self.homography is None:
             self.pending = None
-        if reacquired:
-            self.line_warp = np.eye(3, dtype=np.float64)
-        homography = np.linalg.inv(self.line_warp @ np.linalg.inv(homography))
-        homography /= homography[2, 2]
         self.homography = homography.astype(np.float64)
         self.last_valid_frame = frame_index
+        self.last_keypoint_frame = frame_index
+        self.model_update_acceptances += 1
         self.last_stats.update(reason="accepted", reacquired=bool(reacquired))
         return True
+
+    def update_camera_motion(
+        self,
+        warp: np.ndarray,
+        source_frame: int | None,
+        frame_index: int,
+    ) -> bool:
+        """Carry the court map through a validated previous-to-current affine warp."""
+        frame_index = int(frame_index)
+        if (
+            self.homography is None
+            or source_frame is None
+            or int(source_frame) != self.last_valid_frame
+            or frame_index <= self.last_camera_motion_frame
+        ):
+            return False
+        warp = np.asarray(warp, dtype=np.float64)
+        if warp.shape != (2, 3) or not np.isfinite(warp).all():
+            return False
+        image_warp = np.eye(3, dtype=np.float64)
+        image_warp[:2] = warp
+        if abs(float(np.linalg.det(image_warp[:2, :2]))) < 1e-6:
+            return False
+        try:
+            homography = self.homography @ np.linalg.inv(image_warp)
+        except np.linalg.LinAlgError:
+            return False
+        if not np.isfinite(homography).all() or abs(float(homography[2, 2])) < 1e-9:
+            return False
+        homography /= homography[2, 2]
+        if self._project_court_to_image(homography, self.anchor_points) is None:
+            return False
+        self.homography = homography
+        self.last_valid_frame = frame_index
+        self.last_camera_motion_frame = frame_index
+        if self.pending is not None:
+            pending_anchors, _, confirmations = self.pending
+            transformed = cv2.transform(
+                np.asarray(pending_anchors, dtype=np.float32).reshape(1, -1, 2),
+                warp.astype(np.float32),
+            ).reshape(-1, 2)
+            self.pending = (transformed, frame_index, confirmations)
+        return True
+
+    def is_recent(self, frame_index: int) -> bool:
+        """Return whether the current court map has recent visual support."""
+        age = int(frame_index) - self.last_valid_frame
+        return (
+            self.homography is not None
+            and 0 <= age <= COURT_MAP_MAX_AGE_FRAMES
+        )
 
     def transform(
         self,
@@ -377,13 +474,9 @@ class CourtMapper:
         """Map an image point to court meters, optionally accepting stale maps."""
         if point is None or self.homography is None:
             return None
-        max_age = (
-            30
-            if allow_stale
-            else 5
-        )
+        max_age = COURT_MAP_MAX_AGE_FRAMES if allow_stale else 0
         age = int(frame_index) - self.last_valid_frame
-        if age < 0 or age > max_age:
+        if age < 0 or age > max_age or not self.is_recent(frame_index):
             return None
         point = np.asarray(point, dtype=np.float32).reshape(1, 1, 2)
         if not np.isfinite(point).all():
@@ -397,123 +490,6 @@ class CourtMapper:
             mapped = np.clip(mapped, self.court_min, self.court_max)
         return mapped.astype(np.float32)
 
-    def refine(self, frame: np.ndarray, frame_index: int, occluders: tuple[Any, ...] | list[Any] = ()) -> bool:
-        """Refine the current map by aligning projected lines with image edges."""
-        return _refine_court_mapper(self, frame, frame_index, occluders)
-
-
-def _refine_court_mapper(mapper, frame, frame_index, occluders=()):
-    radius = 16
-    frame_index = int(frame_index)
-    if (
-        mapper.homography is None
-        or mapper.last_valid_frame != frame_index
-        or (
-            not mapper.last_stats.get("reacquired", False)
-            and frame_index - mapper.last_refine_frame < 15
-        )
-    ):
-        return False
-    height, width = frame.shape[:2]
-    scale = min(
-        1.0,
-        320.0 / max(height, width),
-    )
-    min_dimension = 1
-    size = (max(min_dimension, round(width * scale)), max(min_dimension, round(height * scale)))
-    base_h = mapper.homography.copy()
-    template = np.zeros((size[1], size[0]), dtype=np.uint8)
-    projected_paths = [mapper._project_court_to_image(base_h, path) for path in COURT_PATHS]
-    template_paths = [np.rint(points * scale).astype(np.int32) for points in projected_paths if points is not None]
-    cv2.polylines(
-        template,
-        template_paths,
-        False,
-        255,
-        2,
-        cv2.LINE_AA,
-    )
-    band = cv2.dilate(
-        template,
-        np.ones(
-            (max(3, round(radius * scale) * 2 + 1),) * 2,
-            np.uint8,
-        ),
-    )
-    small = cv2.resize(frame, size, interpolation=cv2.INTER_AREA)
-    blur_kernel = 5
-    gray = cv2.GaussianBlur(cv2.cvtColor(small, cv2.COLOR_BGR2GRAY), (blur_kernel, blur_kernel), 0)
-    median = float(np.median(gray))
-    for box in occluders:
-        x1, y1, x2, y2 = np.rint(np.asarray(box) * scale).astype(int)
-        pad = 2
-        cv2.rectangle(band, (x1 - pad, y1 - pad), (x2 + pad, y2 + pad), 0, -1)
-    edges = cv2.bitwise_and(
-        cv2.Canny(
-            gray,
-            max(
-                20,
-                int(0.66 * median),
-            ),
-            min(
-                255,
-                int(1.33 * median),
-            ),
-        ),
-        band,
-    )
-    if cv2.countNonZero(edges) < 60:
-        return False
-    template = cv2.GaussianBlur(template, (0, 0), 2.0)
-    edges = cv2.GaussianBlur(edges, (0, 0), 2.0)
-    warp = np.eye(3, dtype=np.float32)
-    criteria = (
-        cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT,
-        35,
-        0.0001,
-    )
-    try:
-        score, warp = cv2.findTransformECC(
-            template,
-            edges,
-            warp,
-            cv2.MOTION_HOMOGRAPHY,
-            criteria,
-            band,
-            5,
-        )
-    except cv2.error:
-        return False
-    if not np.isfinite(warp).all() or score < 0.18:
-        return False
-    scale_matrix = np.diag((scale, scale, 1.0))
-    warp_full = np.linalg.inv(scale_matrix) @ warp.astype(np.float64) @ scale_matrix
-    candidate_h = np.linalg.inv(warp_full @ np.linalg.inv(base_h))
-    candidate_h /= candidate_h[2, 2]
-    old_anchors = mapper._project_court_to_image(
-        np.linalg.inv(np.linalg.inv(mapper.line_warp) @ np.linalg.inv(base_h)), mapper.anchor_points
-    )
-    new_anchors = mapper._project_court_to_image(candidate_h, mapper.anchor_points)
-    if old_anchors is None or new_anchors is None:
-        return False
-    shift = np.linalg.norm(new_anchors - old_anchors, axis=1)
-    max_shift = max(
-        6.0,
-        0.012 * max(height, width),
-    )
-    if (
-        float(np.median(shift)) > max_shift
-        or float(np.percentile(shift, 90))
-        > 2.5 * max_shift
-    ):
-        return False
-    mapper.homography = candidate_h.astype(np.float64)
-    mapper.line_warp = warp_full @ mapper.line_warp
-    mapper.last_refine_frame = frame_index
-    mapper.last_stats.update(line_score=float(score), refined=True)
-    return True
-
-
 def update_court_state(
     track: Any,
     state: Any,
@@ -523,6 +499,8 @@ def update_court_state(
     pose: tuple[np.ndarray, np.ndarray] | None,
 ) -> None:
     """Smooth a local track's court position while rejecting implausible jumps."""
+    if not court_mapper.is_recent(frame_index):
+        return
     observation = court_mapper.transform(get_player_ground_point(track, pose), frame_index, allow_stale=True)
     if observation is None:
         return
@@ -557,7 +535,7 @@ def is_player_on_court(
     height = float(track.box[3] - track.box[1])
     if not ankle_visible and height < float(min_fallback_height):
         return False
-    if mapper.homography is not None and int(frame_index) - mapper.last_valid_frame <= 30:
+    if mapper.is_recent(frame_index):
         court_point = mapper.transform(
             get_player_ground_point(track, pose),
             frame_index,
@@ -582,6 +560,7 @@ __all__ = [
     "COURT_GEOMETRY",
     "COURT_KEYPOINT_COUNT",
     "COURT_LENGTH_M",
+    "COURT_MAP_MAX_AGE_FRAMES",
     "COURT_PATHS",
     "COURT_WIDTH_M",
     "CourtMapper",

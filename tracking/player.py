@@ -85,6 +85,7 @@ def make_tracker(fps: float, args: Any) -> McByteTracker:
         high_conf_det_threshold=0.15,
         cmc_method='orb',
         cmc_downscale=4,
+        cmc_interval=max(1, int(getattr(args, "cmc_interval", 1))),
     )
 
 

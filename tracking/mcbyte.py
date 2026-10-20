@@ -148,8 +148,10 @@ class ORBCameraMotion:
         self.applied = 0
         self.rejected = 0
         self.skipped = 0
+        self.last_estimate_valid = False
 
     def estimate(self, frame, detections):
+        self.last_estimate_valid = False
         height, width = frame.shape[:2]
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         if self.downscale > 1:
@@ -211,6 +213,7 @@ class ORBCameraMotion:
                         )
                         if safe:
                             warp = estimated
+                            self.last_estimate_valid = True
                         else:
                             self.rejected += 1
                     else:
@@ -365,6 +368,7 @@ class McByteTracker:
         high_conf_det_threshold=0.3,
         cmc_method="orb",
         cmc_downscale=4,
+        cmc_interval=1,
         **_,
     ):
         self.max_time_lost = max(1, round(float(frame_rate) / 30 * int(lost_track_buffer)))
@@ -376,6 +380,8 @@ class McByteTracker:
         self.lost_stracks = []
         self.removed_stracks = []
         self.cmc = GuardedCMC(ORBCameraMotion(cmc_downscale)) if cmc_method != "none" else None
+        if self.cmc is not None:
+            self.cmc.interval = max(1, int(cmc_interval))
         self.pose_mask_detections = 0
         self.pose_mask_pairs_scored = 0
         Tracklet._next_id = 0
@@ -557,7 +563,11 @@ class McByteTracker:
         Tracklet.multi_predict(pool)
 
         if self.cmc is not None and frame is not None:
-            warp = self.cmc.estimate(frame, [track.tlbr for track in high])
+            warp = self.cmc.estimate(
+                frame,
+                [track.tlbr for track in high],
+                frame_index=self.frame_id,
+            )
             Tracklet.multi_gmc(pool, warp)
             Tracklet.multi_gmc(unconfirmed, warp)
 
@@ -635,15 +645,34 @@ class GuardedCMC:
 
     def __init__(self, estimator):
         self.estimator = estimator
-        self.interval = 2
+        self.interval = 1
         self.frame_count = 0
         self.applied = 0
         self.rejected = 0
         self.skipped = 0
+        self.last_warp = np.eye(2, 3, dtype=np.float32)
+        self.last_warp_valid = False
+        self.last_warp_source_frame = None
+        self.last_estimate_frame = None
+        self.force_next = False
 
-    def estimate(self, frame, detections=None):
+    def force_next_estimate(self):
+        """Run CMC on the next frame even when the configured interval skips it."""
+        self.force_next = True
+
+    def estimate(self, frame, detections=None, frame_index=None):
         self.frame_count += 1
-        if self.frame_count % self.interval == 0:
+        current_frame = self.frame_count if frame_index is None else int(frame_index)
+        self.last_warp = np.eye(2, 3, dtype=np.float32)
+        self.last_warp_valid = False
+        self.last_warp_source_frame = None
+        force_estimate = self.force_next
+        self.force_next = False
+        if (
+            self.interval > 1
+            and self.frame_count % self.interval == 0
+            and not force_estimate
+        ):
             self.skipped += 1
             return np.eye(2, 3, dtype=np.float32)
         try:
@@ -651,6 +680,8 @@ class GuardedCMC:
         except Exception:
             self.rejected += 1
             return np.eye(2, 3, dtype=np.float32)
+        self.last_warp_source_frame = self.last_estimate_frame
+        self.last_estimate_frame = current_frame
         if warp is None or np.asarray(warp).shape != (2, 3) or not np.isfinite(warp).all():
             self.rejected += 1
             return np.eye(2, 3, dtype=np.float32)
@@ -659,7 +690,12 @@ class GuardedCMC:
         if np.any(scale < 0.3) or np.any(scale > 3.0):
             self.rejected += 1
             return np.eye(2, 3, dtype=np.float32)
-        if np.any(warp[:, 2] != 0):
+        estimate_valid = getattr(self.estimator, "last_estimate_valid", None)
+        if estimate_valid is None:
+            estimate_valid = not np.allclose(warp, np.eye(2, 3, dtype=np.float32), atol=1e-4)
+        self.last_warp = warp.copy()
+        self.last_warp_valid = bool(estimate_valid)
+        if not np.allclose(warp, np.eye(2, 3, dtype=np.float32), atol=1e-4):
             self.applied += 1
         else:
             self.skipped += 1

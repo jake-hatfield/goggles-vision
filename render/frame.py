@@ -19,6 +19,7 @@ class FrameRenderer:
 
     def __init__(self, court_map: CourtMiniMap) -> None:
         self.court_map = court_map
+        self.player_box_colors: list[dict[int, tuple[int, int, int]]] = []
 
     @staticmethod
     def draw_rim(frame: np.ndarray, context: FrameContext) -> None:
@@ -33,6 +34,7 @@ class FrameRenderer:
         )
 
     def draw_frame(self, frame: np.ndarray, context: FrameContext) -> None:
+        self.player_box_colors.append({**context.player_box_colors, **context.display_box_colors})
         for player in context.feature_players:
             local_id = int(player["local_track_id"])
             track = context.visible_by_id.get(local_id)

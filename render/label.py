@@ -5,8 +5,8 @@ import cv2
 
 
 def text_dimensions(text: str, font_scale: float, thickness: int) -> tuple[tuple[int, int], int]:
-    """Measure a label using the shared Hershey simplex font."""
-    return cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness)
+    """Measure a label using the shared Hershey duplex font."""
+    return cv2.getTextSize(text, cv2.FONT_HERSHEY_DUPLEX, font_scale, thickness)
 
 
 def player_overlay_label(player: Mapping[str, Any]) -> str:

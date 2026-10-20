@@ -18,6 +18,8 @@ def rewrite_identity_overlay(
     team_colors: Any,
     records: list[dict[str, Any]],
     previous_labels: dict | None = None,
+    *,
+    player_box_colors: list[dict[int, tuple[int, int, int]]] | None = None,
 ) -> None:
     """Rewrite output frames with reconciled team colors and player labels."""
     previous_labels = previous_labels or {}
@@ -56,16 +58,19 @@ def rewrite_identity_overlay(
                 if not source_ok or not rendered_ok:
                     break
                 frame_index = int(record.get("frame", written + 1))
+                frame_colors = player_box_colors[written] if player_box_colors is not None else {}
                 for player_index, player in enumerate(record.get("players", ())):
                     x1, y1, _, _ = map(round, player["box"])
                     x1 = min(max(x1, 0), size[0] - 1)
                     y1 = min(max(y1, 0), size[1] - 1)
                     team_id = player.get("team")
-                    draw_color = (
-                        tuple(map(int, team_colors[int(team_id)]))
-                        if team_id is not None and team_colors is not None
-                        else (170, 170, 170)
-                    )
+                    draw_color = frame_colors.get(player.get("local_track_id"))
+                    if draw_color is None:
+                        draw_color = (
+                            tuple(map(int, team_colors[int(team_id)]))
+                            if team_id is not None and team_colors is not None
+                            else (170, 170, 170)
+                        )
                     text = player_overlay_label(player)
                     old_text = previous_labels.get(
                         (frame_index, player.get("local_track_id"), player_index), text

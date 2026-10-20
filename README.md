@@ -8,6 +8,12 @@
 
 **TL;DR:** OpenHoopVision brings free AI tools and game data to amateur and youth basketball, making them accessible to practitioners, coaches, and their families. Its extensible framework supports new events, data, and applications. Exported tracking data can power further AI analysis to help teams understand games and improve performance.
 
+## Latest Updates
+
+- **Updated basketball detector:** The RF-DETR checkpoint adds `ball-in-basket` as a visual cue for shot-outcome detection.
+- **Improved court mapping:** Homography validation, reacquisition, and camera-motion compensation improve mapping stability.
+- **Structured shot-event export:** Versioned JSON includes timing, outcome, court location, shot attributes, and available player/team data.
+
 ## Demo
 
 <p align="center">
