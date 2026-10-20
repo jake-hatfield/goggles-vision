@@ -17,7 +17,7 @@ from tqdm import tqdm
 
 from events.detector import BallEventPipeline
 from models.court import CourtPoseDetector
-from models.detectors import resolve_detector_class_ids
+from models.detectors import detect_batch, predict_shape, resolve_detector_class_ids
 from models.jersey_number import JerseyNumberReader
 from models.player_pose import PlayerPoseDetector
 from pipeline.context import (
@@ -463,20 +463,73 @@ class VideoAnalysisRunner:
 
     def _run_video(self) -> None:
         state = self.state
+        batch_size = max(1, int(getattr(state.args, "detector_batch_size", 16)))
         while True:
-            has_frame, frame = state.capture.read()
-            if not has_frame or (state.args.max_frames is not None and state.frame_index >= state.args.max_frames):
+            frames = []
+            for _ in range(batch_size):
+                if state.args.max_frames is not None and state.frame_index + len(frames) >= state.args.max_frames:
+                    break
+                has_frame, frame = state.capture.read()
+                if not has_frame:
+                    break
+                frames.append(frame)
+            if not frames:
                 break
-            state.frame_index += 1
-            frame_context = self.observer.observe_frame(frame)
-            self.feature_builder.build_rim_feature(frame_context)
-            self.feature_builder.build_frame_features(frame, frame_context)
-            result = self.event_processor.process_frame(frame_context)
-            if self.renderer is not None:
-                self.renderer.draw_rim(frame, frame_context)
-                self.renderer.draw_frame(frame, frame_context)
-            self._write_frame(frame, result)
-            state.progress.update(1)
+
+            detector_results = None
+            inference_futures = None
+            if batch_size > 1:
+                first_frame_index = state.frame_index + 1
+                inference_futures = [
+                    self.observer.schedule_inference(frame, first_frame_index + offset)
+                    for offset, frame in enumerate(frames)
+                ]
+                if state.detector_shape is None:
+                    state.detector_shape = predict_shape(frames[0], state.args.short_side)
+                rgb_frames = [cv2.cvtColor(frame, cv2.COLOR_BGR2RGB) for frame in frames]
+                detector_results = []
+                batch_offset = 0
+                while batch_offset < len(rgb_frames):
+                    rgb_batch = rgb_frames[batch_offset : batch_offset + batch_size]
+                    try:
+                        predictions = detect_batch(
+                            state.detector,
+                            rgb_batch,
+                            state.detector_shape,
+                            state.class_ids,
+                            player_threshold=state.args.player_threshold,
+                            ball_threshold=state.args.ball_threshold,
+                            rim_threshold=state.args.rim_threshold,
+                            holder_threshold=state.args.holder_threshold,
+                            scorer_threshold=state.args.scorer_threshold,
+                            referee_threshold=state.args.referee_threshold,
+                            ball_in_basket_threshold=state.args.ball_in_basket_threshold,
+                        )
+                    except torch.cuda.OutOfMemoryError:
+                        if batch_size == 1:
+                            raise
+                        batch_size = max(1, batch_size // 2)
+                        torch.cuda.empty_cache()
+                        print(f"CUDA memory limit reached; detector batch size reduced to {batch_size}")
+                        continue
+                    detector_results.extend(predictions)
+                    batch_offset += len(rgb_batch)
+
+            for offset, frame in enumerate(frames):
+                state.frame_index += 1
+                frame_context = self.observer.observe_frame(
+                    frame,
+                    detector_detections=None if detector_results is None else detector_results[offset],
+                    inference_futures=None if inference_futures is None else inference_futures[offset],
+                )
+                self.feature_builder.build_rim_feature(frame_context)
+                self.feature_builder.build_frame_features(frame, frame_context)
+                result = self.event_processor.process_frame(frame_context)
+                if self.renderer is not None:
+                    self.renderer.draw_rim(frame, frame_context)
+                    self.renderer.draw_frame(frame, frame_context)
+                self._write_frame(frame, result)
+                state.progress.update(1)
         state.frame_processing_elapsed = time.perf_counter() - state.start_time
 
     def run(self) -> None:

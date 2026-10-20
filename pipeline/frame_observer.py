@@ -1,3 +1,5 @@
+from typing import Any
+
 import cv2
 import numpy as np
 
@@ -59,7 +61,22 @@ class FrameObserver:
             self.state.player_states.setdefault(track_id, PlayerState())
         return visible_tracks, visible_by_id
 
-    def observe_frame(self, frame: np.ndarray) -> FrameContext:
+    def schedule_inference(self, frame: np.ndarray, frame_index: int) -> tuple[object, object]:
+        """Submit frame-independent pose and court inference ahead of detector work."""
+        court_future = None
+        if (frame_index - 1) % self.state.args.court_interval == 0:
+            court_future = self.state.court_pose.submit(frame)
+        pose_future = None
+        if (frame_index - 1) % self.state.args.pose_interval == 0:
+            pose_future = self.state.player_pose.submit(frame)
+        return pose_future, court_future
+
+    def observe_frame(
+        self,
+        frame: np.ndarray,
+        detector_detections: tuple[Any, Any, Any, Any, Any, Any, Any] | None = None,
+        inference_futures: tuple[object, object] | None = None,
+    ) -> FrameContext:
         if self.state.identity_resolver.detect_clip_cut(frame, self.state.frame_index):
             self.state.ball_tracker.reset()
             self.state.holder_state.reset()
@@ -80,28 +97,36 @@ class FrameObserver:
                 state.court_observation = None
                 state.court_position = None
                 state.court_frame = -(10**9)
-        court_future = None
-        if (self.state.frame_index - 1) % self.state.args.court_interval == 0:
-            court_future = self.state.court_pose.submit(frame)
+        if inference_futures is None:
+            inference_futures = self.schedule_inference(frame, self.state.frame_index)
+        pose_future, court_future = inference_futures
         pose_scheduled = (self.state.frame_index - 1) % self.state.args.pose_interval == 0
-        pose_future = None
-        if pose_scheduled:
-            pose_future = self.state.player_pose.submit(frame)
-        if self.state.detector_shape is None:
-            self.state.detector_shape = predict_shape(frame, self.state.args.short_side)
-        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        detector_players, balls, rims, holders, scorers, referees = detect(
-            self.state.detector,
-            frame_rgb,
-            self.state.detector_shape,
-            self.state.class_ids,
-            player_threshold=self.state.args.player_threshold,
-            ball_threshold=self.state.args.ball_threshold,
-            rim_threshold=self.state.args.rim_threshold,
-            holder_threshold=self.state.args.holder_threshold,
-            scorer_threshold=self.state.args.scorer_threshold,
-            referee_threshold=self.state.args.referee_threshold,
-        )
+        if detector_detections is None:
+            if self.state.detector_shape is None:
+                self.state.detector_shape = predict_shape(frame, self.state.args.short_side)
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            detector_detections = detect(
+                self.state.detector,
+                frame_rgb,
+                self.state.detector_shape,
+                self.state.class_ids,
+                player_threshold=self.state.args.player_threshold,
+                ball_threshold=self.state.args.ball_threshold,
+                rim_threshold=self.state.args.rim_threshold,
+                holder_threshold=self.state.args.holder_threshold,
+                scorer_threshold=self.state.args.scorer_threshold,
+                referee_threshold=self.state.args.referee_threshold,
+                ball_in_basket_threshold=self.state.args.ball_in_basket_threshold,
+            )
+        (
+            detector_players,
+            balls,
+            rims,
+            holders,
+            scorers,
+            referees,
+            balls_in_basket,
+        ) = detector_detections
         if not pose_scheduled:
             pose_boxes = np.empty((0, 4), dtype=np.float32)
             pose_points = np.empty((0, 17, 2), dtype=np.float32)
@@ -271,6 +296,7 @@ class FrameObserver:
             holders=holders,
             scorers=scorers,
             referees=referees,
+            balls_in_basket=balls_in_basket,
             visible_tracks=visible_tracks,
             display_only_tracks=display_only_tracks,
             reid_tracks=[track for track in visible_tracks if track.track_id in reid_track_ids],

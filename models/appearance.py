@@ -205,12 +205,18 @@ class SportsReIDEncoder:
             checkpoint = torch.load(
                 self.weights,
                 map_location="cpu",
-                weights_only=False,
+                weights_only=True,
             )
+            if not isinstance(checkpoint, dict):
+                raise RuntimeError("sports ReID checkpoint must contain a state dictionary")
             state = checkpoint.get("state_dict", checkpoint)
+            if not isinstance(state, dict):
+                raise RuntimeError("sports ReID checkpoint state_dict must be a mapping")
             model_state = self.model.state_dict()
             compatible = {}
             for key, value in state.items():
+                if not isinstance(key, str) or not isinstance(value, torch.Tensor):
+                    continue
                 model_key = key.removeprefix("module.")
                 if model_key in model_state and model_state[model_key].shape == value.shape:
                     compatible[model_key] = value

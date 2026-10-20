@@ -25,7 +25,7 @@ OpenHoopVision analyzes a basketball video one frame at a time. It detects playe
 
 ## What Can It Do?
 
-- Detect players, the ball, the rim, scorers, holders, and referees.
+- Detect players, the ball, the rim, scorers, holders, referees, and `ball-in-basket`.
 - Associate player detections with pose keypoints and local tracks.
 - Estimate team colors and reconcile player identities across frames with sports ReID and jersey-number OCR.
 - Map detected court keypoints to a court layout and draw a mini-map.
@@ -56,9 +56,10 @@ The shot detector uses ball motion and rim evidence to distinguish shots from dr
 | --- | --- |
 | RF-DETR detector (`Basketball-Detection-v6`) | mAP@0.5: 84.9%; mAP@0.5:0.95: 62.3% |
 | YOLO26s court pose (`court-detection-v2`) | mAP@0.5: 96.8%; mAP@0.5:0.95: 81.1% |
-| End-to-end shot pipeline (`basketball-event-recognition`) | Precision: 85.51%; recall: 83.10%; F1: 84.29%; team attribution accuracy: 79.66% (47/59). |
+| End-to-end shot pipeline (`basketball-event-recognition`) | Precision: 85.51%; recall: 83.10%; F1: 84.29%; team attribution accuracy: 84.75% (50/59). |
+| Shot made (with `ball-in-basket`) | Precision: 89.13%; recall: 82.00%; F1: 85.42%. |
 
-All datasets were curated and annotated in-house. Model scores use validation splits. End-to-end metrics cover 71 shots across 7 videos, matched one-to-one at temporal IoU ≥ 0.5. A ±0.5 s onset tolerance was used for one incomplete annotation.
+All datasets were curated and annotated in-house. Model scores use validation splits. The current end-to-end regression covers 71 shots across 7 videos, including 50 makes, with strict one-to-one matching at temporal IoU ≥ 0.5 and a `ball-in-basket` threshold of 0.55. Team attribution accuracy uses the 59 matched shots as its denominator.
 
 ## Run OpenHoopVision
 

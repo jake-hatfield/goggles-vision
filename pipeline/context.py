@@ -12,6 +12,7 @@ class FrameContext:
     holders: Any
     scorers: Any
     referees: Any
+    balls_in_basket: Any
     visible_tracks: list[Any]
     display_only_tracks: list[Any]
     reid_tracks: list[Any]

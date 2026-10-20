@@ -236,7 +236,8 @@ class BallEventPipeline:
                 (ball.x, ball.y), wrists
             )
         events = self.machine.update(
-            ball, rim_box, frame, t, scale, scale_hint, wrists, shooter, rim_fresh=bool(rim_dets)
+            ball, rim_box, frame, t, scale, scale_hint, wrists, shooter,
+            rim_fresh=bool(rim_dets), basket_detections=detections.get("ball-in-basket", ()),
         )
         active_shot_start = None if self.machine.shot is None else self.machine.shot["start_frame"]
         active_dribble = self.machine.active_dribble

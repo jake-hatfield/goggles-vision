@@ -1,9 +1,11 @@
-from collections import deque
 import math
+from collections import deque
+from dataclasses import dataclass
+from typing import Any
 
+from events.context import event_team, nearest_wrist_distance, normalize_team
 from events.scoring import shot_point_value
 from tracking.ball import BallTrack, normalize_fps
-from events.context import event_team, nearest_wrist_distance, normalize_team
 
 
 class ShotOutcomeResolver:
@@ -26,6 +28,9 @@ class ShotOutcomeResolver:
     def resolve(self, result, confidence, frame):
         machine = self.machine
         shot = machine.shot
+        basket_confirmed = shot.get("basket_confirmed", False)
+        if basket_confirmed:
+            result, confidence = "made", "detector_confirmed"
         scorer_tag = shot.get("scorer_tag") or {}
         scorer_confidence = float(scorer_tag.get("confidence") or 0.0)
         if result == "miss" and not shot["crossed"]:
@@ -52,7 +57,7 @@ class ShotOutcomeResolver:
                     machine._discard()
                     machine.await_exit = True
                     return None
-        if not shot["crossed"]:
+        if not shot["crossed"] and not basket_confirmed:
             if scorer_confidence < machine.parameters.get('late_entry_min_scorer_confidence', 0.3):
                 distance_parameter = "late_entry_max_rim_dist_w" if shot["late_entry"] else "noncross_max_rim_dist_w"
                 max_distance = machine.parameters.get(
@@ -86,7 +91,9 @@ class ShotOutcomeResolver:
             frame,
             result,
             confidence,
-            "observed_rim_crossing" if shot["crossed"] else "observed_rim_trajectory",
+            "ball_in_basket" if basket_confirmed else (
+                "observed_rim_crossing" if shot["crossed"] else "observed_rim_trajectory"
+            ),
             event_scorer_tag,
             points=(court_points or 2) if result == "made" else 0,
         )
@@ -255,6 +262,22 @@ class ShotRimCrossing:
         return None
 
 
+@dataclass(frozen=True, slots=True)
+class _DiscardedFlightEvidence:
+    """Measured trajectory signals used to classify an unresolved flight."""
+
+    sample_count: int
+    rise: float
+    descent: float
+    duration: float
+    holder_fraction: float
+    inside_fraction: float
+    scorer_tag: dict[str, Any]
+    scorer_confidence: float
+    min_rim_distance: float
+    near_rim_frames: int
+
+
 class ShotTrajectoryAnalyzer:
     """Recover shot events from ball motion around tracking gaps."""
 
@@ -361,65 +384,18 @@ class ShotTrajectoryAnalyzer:
                 machine.crossing.crossing(previous, current_ball, rim_box, current_sample[0])
         return machine._flight(ball, rim_box, frame, float(t), rim_fresh, shooter)
 
-    def discarded_flight_event(self, shot):
+    def discarded_flight_event(self, shot: dict[str, Any] | None) -> dict[str, Any] | None:
+        """Record a strongly supported trajectory when rim evidence cannot settle it."""
         machine = self.machine
         if shot is None or shot["crossed"] or shot["player_id"] is None:
             return None
-        samples = [sample for sample in shot["samples"] if not sample[4]]
-        if len(samples) < machine.parameters.get('no_rim_min_observed_samples', 8):
-            return None
 
-        rise = samples[0][3] - min(sample[3] for sample in samples)
-        apex_y = min(sample[3] for sample in samples)
-        descent = samples[-1][3] - apex_y
-        duration = samples[-1][1] - shot["start_time"]
-        holder_fraction = shot["holder_frames"] / max(shot["flight_context_frames"], 1)
-        inside_fraction = shot["ball_inside_player_box_frames"] / max(shot["player_box_frames"], 1)
-        scorer_tag = shot.get("peak_scorer_tag") or shot.get("scorer_tag") or {}
-        scorer_confidence = float(scorer_tag.get("confidence") or 0.0)
-        min_rim_distance = shot.get("min_rim_center_distance_widths", math.inf)
-        strong_scorer_path = (
-            shot["entered"]
-            and min_rim_distance <= machine.parameters.get('no_rim_entry_scorer_max_dist_w', 2.0)
-            and rise >= machine.parameters.get('strong_unresolved_rise_px', 100.0)
-            and scorer_confidence
-            >= machine.parameters.get('no_rim_strong_scorer_confidence', 0.6)
-        )
-        holder_scorer_path = (
-            not shot["entered"]
-            and scorer_confidence >= machine.parameters.get('no_rim_holder_scorer_confidence', 0.4)
-            and holder_fraction >= machine.parameters.get('no_rim_holder_min_fraction', 0.85)
-            and inside_fraction >= machine.parameters.get('no_rim_holder_box_min_fraction', 0.6)
-            and rise >= machine.parameters.get('no_rim_holder_min_rise_px', 60.0)
-        )
-        near_rim_path = (
-            shot["entered"]
-            and len(samples) >= machine.parameters.get('no_rim_near_min_observed_samples', 10)
-            and scorer_confidence >= machine.parameters.get('no_rim_near_min_scorer_confidence', 0.35)
-            and duration >= machine.parameters.get('no_rim_near_min_flight_seconds', 0.5)
-            and rise >= machine.parameters.get('no_rim_near_min_rise_px', 50.0)
-            and min_rim_distance <= machine.parameters.get('no_rim_near_max_distance_widths', 3.0)
-            and holder_fraction >= machine.parameters.get('no_rim_near_holder_min_fraction', 0.85)
-            and inside_fraction >= machine.parameters.get('no_rim_near_holder_box_min_fraction', 0.5)
-        )
-        near_rim_frames = int(shot.get("near_rim_frames", 0))
-        persistent_near_rim = (
-            shot["entered"]
-            and duration >= machine.parameters.get('no_rim_persist_near_min_flight_s', 1.0)
-            and near_rim_frames
-            >= round(machine.fps * machine.parameters.get('no_rim_persist_near_min_duration_s', 0.5))
-            and near_rim_frames / max(len(samples), 1)
-            >= machine.parameters.get('no_rim_persistent_near_min_fraction', 0.5)
-            and min_rim_distance <= machine.parameters.get('no_rim_persist_near_max_dist_w', 0.75)
-            and holder_fraction < machine.parameters.get('persistent_holder_min_fraction', 0.85)
-        )
-        normal_arc_path = (
-            duration >= machine.parameters.get('no_rim_min_flight_seconds', 0.4)
-            and rise >= machine.parameters.get('no_rim_min_rise_px', 50.0)
-            and descent >= machine.parameters.get('no_rim_min_descent_px', 40.0)
-            and (strong_scorer_path or holder_scorer_path or near_rim_path)
-        )
-        if not (normal_arc_path or persistent_near_rim):
+        evidence = self._discarded_flight_evidence(shot)
+        if evidence is None:
+            return None
+        normal_arc = self._has_normal_arc_evidence(shot, evidence)
+        persistent_near_rim = self._has_persistent_near_rim_evidence(shot, evidence)
+        if not (normal_arc or persistent_near_rim):
             return None
 
         previous_event = machine.last_event or {}
@@ -429,13 +405,90 @@ class ShotTrajectoryAnalyzer:
         ):
             return None
 
-        frame = int(machine.last_frame)
         result_source = (
             "persistent_near_rim_unresolved_trajectory"
             if persistent_near_rim
             else "scorer_confirmed_unresolved_trajectory"
         )
-        return machine.outcomes.event_record(shot, frame, "unknown", "trajectory_only", result_source, scorer_tag)
+        return machine.outcomes.event_record(
+            shot,
+            int(machine.last_frame),
+            "unknown",
+            "trajectory_only",
+            result_source,
+            evidence.scorer_tag,
+        )
+
+    def _discarded_flight_evidence(self, shot: dict[str, Any]) -> _DiscardedFlightEvidence | None:
+        machine = self.machine
+        samples = [sample for sample in shot["samples"] if not sample[4]]
+        if len(samples) < machine.parameters.get('no_rim_min_observed_samples', 8):
+            return None
+
+        apex_y = min(sample[3] for sample in samples)
+        scorer_tag = shot.get("peak_scorer_tag") or shot.get("scorer_tag") or {}
+        return _DiscardedFlightEvidence(
+            sample_count=len(samples),
+            rise=samples[0][3] - apex_y,
+            descent=samples[-1][3] - apex_y,
+            duration=samples[-1][1] - shot["start_time"],
+            holder_fraction=shot["holder_frames"] / max(shot["flight_context_frames"], 1),
+            inside_fraction=shot["ball_inside_player_box_frames"] / max(shot["player_box_frames"], 1),
+            scorer_tag=scorer_tag,
+            scorer_confidence=float(scorer_tag.get("confidence") or 0.0),
+            min_rim_distance=shot.get("min_rim_center_distance_widths", math.inf),
+            near_rim_frames=int(shot.get("near_rim_frames", 0)),
+        )
+
+    def _has_normal_arc_evidence(self, shot: dict[str, Any], evidence: _DiscardedFlightEvidence) -> bool:
+        machine = self.machine
+        scorer_confidence = evidence.scorer_confidence
+        strong_scorer_path = (
+            shot["entered"]
+            and evidence.min_rim_distance <= machine.parameters.get('no_rim_entry_scorer_max_dist_w', 2.0)
+            and evidence.rise >= machine.parameters.get('strong_unresolved_rise_px', 100.0)
+            and scorer_confidence >= machine.parameters.get('no_rim_strong_scorer_confidence', 0.6)
+        )
+        holder_scorer_path = (
+            not shot["entered"]
+            and scorer_confidence >= machine.parameters.get('no_rim_holder_scorer_confidence', 0.4)
+            and evidence.holder_fraction >= machine.parameters.get('no_rim_holder_min_fraction', 0.85)
+            and evidence.inside_fraction >= machine.parameters.get('no_rim_holder_box_min_fraction', 0.6)
+            and evidence.rise >= machine.parameters.get('no_rim_holder_min_rise_px', 60.0)
+        )
+        near_rim_path = (
+            shot["entered"]
+            and evidence.sample_count >= machine.parameters.get('no_rim_near_min_observed_samples', 10)
+            and scorer_confidence >= machine.parameters.get('no_rim_near_min_scorer_confidence', 0.35)
+            and evidence.duration >= machine.parameters.get('no_rim_near_min_flight_seconds', 0.5)
+            and evidence.rise >= machine.parameters.get('no_rim_near_min_rise_px', 50.0)
+            and evidence.min_rim_distance <= machine.parameters.get('no_rim_near_max_distance_widths', 3.0)
+            and evidence.holder_fraction >= machine.parameters.get('no_rim_near_holder_min_fraction', 0.85)
+            and evidence.inside_fraction >= machine.parameters.get('no_rim_near_holder_box_min_fraction', 0.5)
+        )
+        return (
+            evidence.duration >= machine.parameters.get('no_rim_min_flight_seconds', 0.4)
+            and evidence.rise >= machine.parameters.get('no_rim_min_rise_px', 50.0)
+            and evidence.descent >= machine.parameters.get('no_rim_min_descent_px', 40.0)
+            and (strong_scorer_path or holder_scorer_path or near_rim_path)
+        )
+
+    def _has_persistent_near_rim_evidence(
+        self,
+        shot: dict[str, Any],
+        evidence: _DiscardedFlightEvidence,
+    ) -> bool:
+        machine = self.machine
+        return (
+            shot["entered"]
+            and evidence.duration >= machine.parameters.get('no_rim_persist_near_min_flight_s', 1.0)
+            and evidence.near_rim_frames
+            >= round(machine.fps * machine.parameters.get('no_rim_persist_near_min_duration_s', 0.5))
+            and evidence.near_rim_frames / max(evidence.sample_count, 1)
+            >= machine.parameters.get('no_rim_persistent_near_min_fraction', 0.5)
+            and evidence.min_rim_distance <= machine.parameters.get('no_rim_persist_near_max_dist_w', 0.75)
+            and evidence.holder_fraction < machine.parameters.get('persistent_holder_min_fraction', 0.85)
+        )
 
 
 class ShotFlightContext:
@@ -748,7 +801,10 @@ class ShotStateMachine:
     def locked_rim_center(self):
         return None if self.shot is None else self.shot["rim_center"]
 
-    def update(self, ball, rim_box, frame, t, scale, scale_hint, wrists, shooter, rim_fresh=False):
+    def update(
+        self, ball, rim_box, frame, t, scale, scale_hint, wrists, shooter,
+        rim_fresh=False, basket_detections=(),
+    ):
         frame = int(frame)
         self.last_frame = frame
         self.pending_events = []
@@ -759,6 +815,7 @@ class ShotStateMachine:
             self.shot["rim_center"] = self._center(rim_box)
             self.shot["rim_width"] = max(rim_box[2] - rim_box[0], 1.0)
         self.flight_context.remember_motion(ball, frame, float(t))
+        self._observe_basket(ball, rim_box, frame, basket_detections)
         dribble_events = self._update_dribble(ball, rim_box, frame, float(t), shooter)
 
         holder_id = None if shooter is None else shooter.get("holder_id")
@@ -800,12 +857,13 @@ class ShotStateMachine:
                         and rim_box is not None
                         and self._near_rim(ball, rim_box)
                     )
-                    if shot["near_rim_frames"] >= self.parameters.get('holder_switch_near_rim_min_samples', 3):
-                        event = self.outcomes.resolve("miss", "rattled", frame)
-                        if event is not None:
-                            handoff_events.append(event)
-                    elif not near_rim:
-                        self._discard()
+                    if not near_rim:
+                        if shot["near_rim_frames"] >= self.parameters.get('holder_switch_near_rim_min_samples', 3):
+                            event = self.outcomes.resolve("miss", "rattled", frame)
+                            if event is not None:
+                                handoff_events.append(event)
+                        else:
+                            self._discard()
         elif self.shot is None and self.await_exit and release_confirmed:
             last_player = None if self.last_event is None else self.last_event.get("player_id")
             if last_player is None or str(holder_id) != str(last_player):
@@ -830,6 +888,39 @@ class ShotStateMachine:
             if event is not None:
                 dribble_events.append(event)
         return handoff_events + (shot_events or []) + dribble_events + self.pending_events
+
+    def _observe_basket(self, ball, rim_box, frame, detections):
+        """Require two consecutive net detections during an existing rim approach."""
+        shot = self.shot
+        if shot is None or not shot["entered"] or rim_box is None or not detections:
+            return
+        previous = shot["last_observed"]
+        if previous is None or frame - previous[0] > self.max_gap_frames:
+            return
+        observed = ball is not None and not ball.interpolated
+        if (observed and ball.vy <= 0) or (not observed and self.phase != self.DESCENDING):
+            return
+        x, y = (ball.x, ball.y) if observed else previous[2:4]
+        x1, top, x2, bottom = rim_box
+        width = max(x2 - x1, 1.0)
+        # A stationary rim texture can be detected as both ball and net.
+        # Reuse the existing arc requirement before accepting this evidence.
+        if shot["release_y"] - shot["min_y"] < self.parameters.get('short_noncross_min_arc_rim_widths', 0.75) * width:
+            return
+        if not (x1 - 0.25 * width <= x <= x2 + 0.25 * width and top - 0.5 * width <= y <= bottom + width):
+            return
+        for detection in detections:
+            box = detection.get("box")
+            if not box:
+                continue
+            bx1, by1, bx2, by2 = box
+            if not (bx1 <= (x1 + x2) * 0.5 <= bx2 and by1 - 0.25 * width <= top <= by2):
+                continue
+            consecutive = frame == shot.get("basket_last_frame", -1) + 1
+            shot["basket_frames"] = shot.get("basket_frames", 0) + 1 if consecutive else 1
+            shot["basket_last_frame"] = frame
+            shot["basket_confirmed"] = shot.get("basket_confirmed", False) or shot["basket_frames"] >= 2
+            break
 
     def _update_dribble(self, ball, rim_box, frame, t, shooter):
         context = None if shooter is None else shooter.get("holder_context")
@@ -1166,7 +1257,12 @@ class ShotStateMachine:
 
     def _discard(self):
         shot = self.shot
+        if shot is not None and shot.get("basket_confirmed"):
+            self.pending_events.append(self.outcomes.resolve("made", "detector_confirmed", self.last_frame))
+            return
         event = self.trajectory.discarded_flight_event(shot)
+        self.shot = None
+        self.release_streak.clear()
         if event is not None:
             self.pending_events.append(event)
             self.last_event = event
@@ -1175,8 +1271,6 @@ class ShotStateMachine:
             self.await_exit = True
         else:
             self.phase = self.IDLE
-        self.shot = None
-        self.release_streak.clear()
 
     def _near_rim(self, ball, box):
         x1, y1, x2, y2 = box

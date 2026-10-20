@@ -170,6 +170,7 @@ class FrameEventProcessor:
                 "holder": _detections_feature(ctx.holders),
                 "scorer": scorer_detections,
                 "referee": _detections_feature(ctx.referees),
+                "ball-in-basket": _detections_feature(ctx.balls_in_basket),
             },
             "events": [],
         }
@@ -192,6 +193,7 @@ class FrameEventProcessor:
                     "holder": float(self.state.args.holder_threshold),
                     "scorer": float(self.state.args.scorer_threshold),
                     "referee": float(self.state.args.referee_threshold),
+                    "ball-in-basket": float(self.state.args.ball_in_basket_threshold),
                 },
                 "scorer_player_min_iou": 0.3,
                 "player_detector": str(self.state.args.model),
