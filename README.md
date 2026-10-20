@@ -10,6 +10,7 @@
 
 ## Latest Updates
 
+**2026-10-20**
 - **Updated basketball detector:** The RF-DETR checkpoint adds `ball-in-basket` as a visual cue for shot-outcome detection.
 - **Improved court mapping:** Homography validation, reacquisition, and camera-motion compensation improve mapping stability.
 - **Structured shot-event export:** Versioned JSON includes timing, outcome, court location, shot attributes, and available player/team data.
