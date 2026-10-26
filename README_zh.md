@@ -97,10 +97,12 @@ python -m pip install -e . --no-deps
 | 组件 | 默认路径 |
 | --- | --- |
 | 篮球检测器 | `weights/rf-detr-basketball.pth` |
-| 球员姿态模型 | `weights/yolov8n-pose.pt` |
+| 球员姿态模型 | `weights/rtmpose-s_simcc-aic-coco.pth` |
 | 场地姿态模型 | `weights/yolo26s-pose-court-33kp.pt` |
 | 球员 ReID | [`weights/osnet_x1_0_msmt17.pt`](https://github.com/KaiyangZhou/deep-person-reid) — Torchreid MSMT17 OSNet x1.0 |
 | 球衣号码 OCR | `weights/basketball_jersey_number.ckpt` |
+
+球员姿态推理使用项目内的纯 PyTorch RTMPose-S 实现，不需要安装 MMPose 或 MMCV。
 
 ### 分析视频
 

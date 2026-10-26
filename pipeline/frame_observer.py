@@ -64,8 +64,8 @@ class FrameObserver:
             self.state.player_states.setdefault(track_id, PlayerState())
         return visible_tracks, visible_by_id
 
-    def schedule_inference(self, frame: np.ndarray, frame_index: int) -> tuple[object, object, bool]:
-        """Submit frame-independent pose and court inference ahead of detector work."""
+    def schedule_inference(self, frame: np.ndarray, frame_index: int) -> tuple[object, bool]:
+        """Submit frame-independent court inference ahead of detector work."""
         court_interval = self.state.args.court_interval
         # In batched mode this may be called several frames ahead. The mapper
         # cannot advance until those frames are observed, so base the interval
@@ -76,16 +76,27 @@ class FrameObserver:
         court_future = None
         if court_scheduled:
             court_future = self.state.court_pose.submit(frame)
-        pose_future = None
-        if (frame_index - 1) % self.state.args.pose_interval == 0:
-            pose_future = self.state.player_pose.submit(frame)
-        return pose_future, court_future, court_scheduled
+        return court_future, court_scheduled
+
+    def schedule_player_pose(
+        self,
+        frame: np.ndarray,
+        detector_detections: tuple[Any, Any, Any, Any, Any, Any, Any],
+        frame_index: int,
+    ) -> object | None:
+        """Queue ROI pose inference for a detected frame before frame processing."""
+        if (frame_index - 1) % self.state.args.pose_interval != 0:
+            return None
+        players = detector_detections[0]
+        pose_boxes = np.asarray(players.xyxy, dtype=np.float32).reshape(-1, 4)
+        return self.state.player_pose.submit(frame, pose_boxes)
 
     def observe_frame(
         self,
         frame: np.ndarray,
         detector_detections: tuple[Any, Any, Any, Any, Any, Any, Any] | None = None,
-        inference_futures: tuple[object, object, bool] | None = None,
+        inference_futures: tuple[object, bool] | None = None,
+        pose_inference_future: object | None = None,
     ) -> FrameContext:
         if self.state.identity_resolver.detect_clip_cut(frame, self.state.frame_index):
             self.state.ball_tracker.reset()
@@ -109,7 +120,7 @@ class FrameObserver:
                 state.court_frame = -(10**9)
         if inference_futures is None:
             inference_futures = self.schedule_inference(frame, self.state.frame_index)
-        pose_future, court_future, court_scheduled = inference_futures
+        court_future, court_scheduled = inference_futures
         pose_scheduled = (self.state.frame_index - 1) % self.state.args.pose_interval == 0
         if detector_detections is None:
             if self.state.detector_shape is None:
@@ -137,13 +148,19 @@ class FrameObserver:
             referees,
             balls_in_basket,
         ) = detector_detections
-        if not pose_scheduled:
+        players = detector_players
+        if pose_scheduled:
+            pose_boxes = np.asarray(players.xyxy, dtype=np.float32).reshape(-1, 4)
+            pose_future = pose_inference_future
+            if pose_future is None:
+                pose_future = self.state.player_pose.submit(frame, pose_boxes)
+            pose_boxes, _, pose_points, pose_scores = self.state.player_pose.result(
+                pose_future, frame, pose_boxes
+            )
+        else:
             pose_boxes = np.empty((0, 4), dtype=np.float32)
             pose_points = np.empty((0, 17, 2), dtype=np.float32)
             pose_scores = np.empty((0, 17), dtype=np.float32)
-        else:
-            pose_boxes, _, pose_points, pose_scores = self.state.player_pose.result(pose_future, frame)
-        players = detector_players
         detector_pose_matches = match_pose_to_players(
             detection_tracks(players, score_default=1.0),
             pose_boxes,

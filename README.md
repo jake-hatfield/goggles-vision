@@ -97,10 +97,12 @@ The default checkpoint paths are relative to the project directory:
 | Component | Default path |
 | --- | --- |
 | Basketball detector | `weights/rf-detr-basketball.pth` |
-| Player pose | `weights/yolov8n-pose.pt` |
+| Player pose | `weights/rtmpose-s_simcc-aic-coco.pth` |
 | Court pose | `weights/yolo26s-pose-court-33kp.pt` |
 | Player ReID | [`weights/osnet_x1_0_msmt17.pt`](https://github.com/KaiyangZhou/deep-person-reid) — Torchreid MSMT17 OSNet x1.0 |
 | Jersey-number OCR | `weights/basketball_jersey_number.ckpt` |
+
+Player pose inference uses a standalone PyTorch RTMPose-S implementation and does not require MMPose or MMCV.
 
 ### Analyze a Video
 

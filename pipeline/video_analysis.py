@@ -20,7 +20,7 @@ from events.serialization import write_event_list
 from models.court import CourtPoseDetector
 from models.detectors import detect_batch, predict_shape, resolve_detector_class_ids
 from models.jersey_number import JerseyNumberReader
-from models.player_pose import PlayerPoseDetector
+from models.rtmpose import RTMPosePlayerEstimator
 from pipeline.context import (
     FrameEventResult,
     VideoAnalysisContext,
@@ -329,7 +329,7 @@ class VideoAnalysisRunner:
         detector = from_checkpoint(str(args.model))
         class_ids = resolve_detector_class_ids(detector)
         device = 0 if torch.cuda.is_available() else "cpu"
-        player_pose = PlayerPoseDetector(args.pose_model, args.pose_imgsz, device)
+        player_pose = RTMPosePlayerEstimator(args.pose_checkpoint, args.pose_batch_size, device)
         self._processing_cleanup.callback(player_pose.close)
         court_pose = CourtPoseDetector(args.court_model, args.court_imgsz, device)
         self._processing_cleanup.callback(court_pose.close)
@@ -494,6 +494,7 @@ class VideoAnalysisRunner:
 
             detector_results = None
             inference_futures = None
+            pose_futures = None
             if batch_size > 1:
                 first_frame_index = state.frame_index + 1
                 inference_futures = [
@@ -530,6 +531,14 @@ class VideoAnalysisRunner:
                         continue
                     detector_results.extend(predictions)
                     batch_offset += len(rgb_batch)
+                pose_futures = [
+                    self.observer.schedule_player_pose(
+                        frame,
+                        detector_results[offset],
+                        first_frame_index + offset,
+                    )
+                    for offset, frame in enumerate(frames)
+                ]
 
             for offset, frame in enumerate(frames):
                 state.frame_index += 1
@@ -537,6 +546,7 @@ class VideoAnalysisRunner:
                     frame,
                     detector_detections=None if detector_results is None else detector_results[offset],
                     inference_futures=None if inference_futures is None else inference_futures[offset],
+                    pose_inference_future=None if pose_futures is None else pose_futures[offset],
                 )
                 self.feature_builder.build_rim_feature(frame_context)
                 self.feature_builder.build_frame_features(frame, frame_context)

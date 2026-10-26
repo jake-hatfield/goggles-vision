@@ -197,7 +197,7 @@ class FrameEventProcessor:
                 },
                 "scorer_player_min_iou": 0.3,
                 "player_detector": str(self.state.args.model),
-                "auxiliary_detector": str(self.state.args.pose_model),
+                "pose_estimator": str(self.state.args.pose_checkpoint),
                 "player_identity": {
                     "schema": "global_player_identity_v1",
                     "local_id_field": "local_track_id",

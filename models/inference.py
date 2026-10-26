@@ -22,19 +22,19 @@ class CudaInferenceExecutor:
             self.executor = ThreadPoolExecutor(max_workers=1)
             self.stream = torch.cuda.Stream(device=torch.device(f"cuda:{self.device}"))
 
-    def submit(self, frame: Any) -> Future[Any] | None:
+    def submit(self, *args: Any, **kwargs: Any) -> Future[Any] | None:
         if self.executor is None:
             return None
-        return self.executor.submit(self._infer_on_stream, frame)
+        return self.executor.submit(self._infer_on_stream, *args, **kwargs)
 
-    def result(self, future: Future[Any] | None, frame: Any) -> Any:
-        return future.result() if future is not None else self.infer(frame)
+    def result(self, future: Future[Any] | None, *args: Any, **kwargs: Any) -> Any:
+        return future.result() if future is not None else self.infer(*args, **kwargs)
 
-    def _infer_on_stream(self, frame: Any) -> Any:
+    def _infer_on_stream(self, *args: Any, **kwargs: Any) -> Any:
         if self.stream is None:
-            return self.infer(frame)
+            return self.infer(*args, **kwargs)
         with self.torch.cuda.device(self.device), self.torch.cuda.stream(self.stream):
-            result = self.infer(frame)
+            result = self.infer(*args, **kwargs)
         self.stream.synchronize()
         return result
 
@@ -44,7 +44,7 @@ class CudaInferenceExecutor:
 
 
 class _YoloModelAdapter:
-    """Share YOLO loading and inference lifecycle across pose-model adapters."""
+    """Share YOLO loading and inference lifecycle across YOLO model adapters."""
 
     def __init__(self, checkpoint: str | Path, image_size: int, device: int | str) -> None:
         from ultralytics import YOLO
