@@ -228,7 +228,7 @@ class FrameEventProcessor:
                         "online": True,
                         "global_identity_fusion": True,
                         "crop_region": "square crop centered between shoulder and hip keypoints",
-                        "input_preprocessing": "BGR to RGB, bicubic resize to PARSeq size, normalize to [-1, 1]",
+                        "input_preprocessing": "BGR to RGB, ratio-bucket bicubic resize, normalize to [-1, 1]",
                         "provisional_min_confidence": min_ocr_confidence,
                         "candidate_change": {
                             "minimum_votes": max(4, confirmations),

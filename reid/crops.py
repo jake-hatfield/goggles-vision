@@ -131,26 +131,6 @@ def build_player_crop(
     return crop if crop.size else None
 
 
-def jersey_crop_overlaps_referee(
-    resolver: Any,
-    frame: np.ndarray,
-    track: Any,
-    pose: tuple[np.ndarray, np.ndarray] | None,
-    referee_boxes: Sequence[Sequence[float]],
-) -> bool:
-    """Check whether the configured jersey-number crop intersects a referee box."""
-    if len(referee_boxes) == 0:
-        return False
-    jersey_parameters = resolver.parameters.get("jersey_ocr", {})
-    crops = jersey_torso_crop(
-        frame, track.box, pose, jersey_parameters, include_bounds=True
-    )
-    if crops is None:
-        return False
-    pad = int(jersey_parameters.get("referee_clearance_px", 8))
-    return crop_bounds_overlap(crops["bounds"], referee_boxes, pad)
-
-
 def crop_bounds_overlap(
     bounds: Sequence[float],
     boxes: Sequence[Sequence[float]],

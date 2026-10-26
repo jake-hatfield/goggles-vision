@@ -20,7 +20,6 @@ class JerseyConsensusResult:
 
     added: int
     corrected: int
-    demoted: int
     status_changed: bool
     identity_labels_changed: bool
     labeled: int
@@ -86,37 +85,50 @@ def _is_number_locked(player: PlayerRow) -> bool:
     return bool(player.get("jersey_number_locked", player.get("jersey_number") is not None))
 
 
-def _propagate_global_number_consensus(records: list[Record]) -> tuple[int, int]:
-    votes = defaultdict(Counter)
-    for record in records:
-        for player in record.get("players", ()):
-            global_id = player.get("id")
-            if (
-                global_id is not None
-                and str(player.get("identity_label", "")).startswith("G")
-                and player.get("jersey_number") is not None
-                and _is_number_locked(player)
-            ):
-                votes[global_id][str(player["jersey_number"])] += 1
+def _set_jersey_number(player: PlayerRow, number: str) -> None:
+    player["jersey_number"] = number
+    player["jersey_number_candidate"] = number
+    player["jersey_number_locked"] = True
 
+
+def _resolve_segment_number(
+    online_votes: list[tuple[int, str, float]],
+    ocr_votes: list[tuple[int, str, float]],
+) -> tuple[str | None, bool]:
+    online_number = _compute_number_consensus(online_votes, 3)
+    ocr_number = _compute_number_consensus(
+        ocr_votes, 3, purity_limit=0.65, confidence_limit=0.90, min_span=12
+    )
+    online_numbers = {number for _, number, _ in online_votes}
+    if len(online_numbers) > 1 or (
+        online_numbers and ocr_number is not None and ocr_number not in online_numbers
+    ):
+        return None, True
+    return online_number or ocr_number, False
+
+
+def _propagate_global_number_consensus(
+    records: list[Record],
+    sources: dict[Any, dict[str, set[int]]],
+) -> tuple[int, int]:
     added = corrected = 0
     for record in records:
         for player in record.get("players", ()):
             global_id = player.get("id")
-            number_votes = votes.get(global_id)
+            number_votes = sources.get(global_id)
             if (
                 global_id is None
                 or not str(player.get("identity_label", "")).startswith("G")
                 or _is_number_locked(player)
-                or len(number_votes or ()) != 1
-                or next(iter(number_votes.values()), 0) < 3
+                or len(number_votes or {}) != 1
             ):
                 continue
-            stable_number = next(iter(number_votes))
+            stable_number, source_ids = next(iter(number_votes.items()))
+            if len(source_ids) < 2:
+                continue
             existing = player.get("jersey_number")
             corrected += existing not in (None, stable_number)
-            player["jersey_number"] = stable_number
-            player["jersey_number_locked"] = True
+            _set_jersey_number(player, stable_number)
             added += existing is None
     return added, corrected
 
@@ -163,16 +175,37 @@ def reconcile_jersey_number_records(
     segments = []
     for local_id, rows in by_local_id.items():
         segment = []
+        # Preserve conflict evidence across temporary OCR gaps after an identity split.
+        identity_change_seen = False
         for frame_index, player in rows:
             previous = segment[-1] if segment else None
             previous_id = previous[1].get("id") if previous else None
             global_id = player.get("id")
+            identity_changed = bool(
+                previous_id is not None
+                and global_id is not None
+                and previous_id != global_id
+            )
+            jersey_lock_reset = bool(
+                previous
+                and _is_number_locked(previous[1])
+                and not _is_number_locked(player)
+                and previous[1].get("jersey_number") != player.get("jersey_number")
+            )
+            gap_exceeded = bool(
+                previous
+                and frame_index - previous[0] > LOCAL_TRACK_SEGMENT_MAX_GAP
+            )
             if previous and (
-                frame_index - previous[0] > LOCAL_TRACK_SEGMENT_MAX_GAP
-                or (previous_id is not None and global_id is not None and previous_id != global_id)
+                gap_exceeded
+                or identity_changed
+                or (jersey_lock_reset and not identity_change_seen)
             ):
                 segments.extend(_split_on_jersey_color(segment))
                 segment = []
+                if gap_exceeded:
+                    identity_change_seen = False
+            identity_change_seen |= identity_changed
             segment.append((frame_index, player))
         if segment:
             segments.extend(_split_on_jersey_color(segment))
@@ -196,16 +229,7 @@ def reconcile_jersey_number_records(
             existing = player.get("jersey_number")
             if existing is not None and _is_number_locked(player):
                 online_votes.append((frame_index, str(existing), 1.0))
-        online_number = _compute_number_consensus(online_votes, 3)
-        ocr_number = _compute_number_consensus(
-            ocr_votes, 3, purity_limit=0.65, confidence_limit=0.90, min_span=12
-        )
-        conflict = (
-            online_number is not None
-            and ocr_number is not None
-            and ocr_number != online_number
-        )
-        number = None if conflict else online_number or ocr_number
+        number, conflict = _resolve_segment_number(online_votes, ocr_votes)
         global_id = next(iter(global_ids)) if len(global_ids) == 1 else None
         resolved_segments.append({
             "rows": segment,
@@ -268,8 +292,10 @@ def reconcile_jersey_number_records(
             item["direct_number"] = direct_number
             item["number"] = direct_number
 
-    trusted_numbers, trusted_refs = {}, set()
+    trusted_numbers = {}
     for item in resolved_segments:
+        if item["conflict"]:
+            continue
         first_votes, last_votes = [], []
         full_support, left_support = defaultdict(set), defaultdict(set)
         full_last_frames = defaultdict(set)
@@ -328,58 +354,52 @@ def reconcile_jersey_number_records(
             continue
         trusted_numbers[id(item)] = candidate
         item["number"] = candidate
-        item["conflict"] = False
-        for frame_index, player in item["rows"]:
-            trusted_refs.add((frame_index, int(player["local_track_id"])))
 
-    global_numbers = defaultdict(set)
+    global_number_sources = defaultdict(lambda: defaultdict(set))
     for item in resolved_segments:
-        if item["number"] is not None and item["global_id"] is not None and not item["conflict"]:
-            global_numbers[item["global_id"]].add(item["number"])
-    stable_global_numbers = {
-        global_id: next(iter(numbers))
-        for global_id, numbers in global_numbers.items()
-        if len(numbers) == 1
-    }
+        if item["number"] is None or item["global_id"] is None or item["conflict"]:
+            continue
+        locked_numbers = {
+            str(player["jersey_number"])
+            for _, player in item["rows"]
+            if player.get("jersey_number") is not None and _is_number_locked(player)
+        }
+        if locked_numbers != {item["number"]}:
+            continue
+        local_ids = {
+            int(player["local_track_id"])
+            for _, player in item["rows"]
+            if player.get("local_track_id") is not None
+        }
+        global_number_sources[item["global_id"]][item["number"]].update(local_ids)
 
     added = corrected = 0
     for item in resolved_segments:
         number = item["number"]
-        global_id = item["global_id"]
-        if number is None and not item["conflict"] and global_id in stable_global_numbers:
-            number = stable_global_numbers[global_id]
         if number is not None:
-            for frame_index, player in item["rows"]:
+            for _, player in item["rows"]:
+                if _is_number_locked(player):
+                    continue
                 existing = player.get("jersey_number")
-                ref = (frame_index, int(player["local_track_id"]))
-                if (
-                    existing in (None, number)
-                    or ref in trusted_refs
-                    or not item["conflict"]
-                ):
-                    added += existing is None
-                    corrected += existing is not None and existing != number
-                    player["jersey_number"] = number
-                    player["jersey_number_locked"] = True
+                added += existing is None
+                corrected += existing is not None and existing != number
+                _set_jersey_number(player, number)
 
     for item in resolved_segments:
         number = item.get("direct_number")
         if number is None or item["number"] != number:
             continue
         for _, player in item["rows"]:
+            if _is_number_locked(player):
+                continue
             existing = player.get("jersey_number")
-            if (
-                existing is None
-                or not _is_number_locked(player)
-                or number.startswith(str(existing))
-                or item["global_id"] is None
-            ):
-                added += existing is None
-                corrected += existing is not None and existing != number
-                player["jersey_number"] = number
-                player["jersey_number_locked"] = True
+            added += existing is None
+            corrected += existing is not None and existing != number
+            _set_jersey_number(player, number)
 
-    global_added, global_corrected = _propagate_global_number_consensus(records)
+    global_added, global_corrected = _propagate_global_number_consensus(
+        records, global_number_sources
+    )
     added += global_added
     corrected += global_corrected
 
@@ -391,37 +411,25 @@ def reconcile_jersey_number_records(
                 for frame_index, player in item["rows"]
                 if player.get("jersey_number") is not None and _is_number_locked(player)
             ]
-            online_number = _compute_number_consensus(online_votes, 3)
-            ocr_number = _compute_number_consensus(
-                item["ocr_votes"], 3, purity_limit=0.65, confidence_limit=0.90, min_span=12
-            )
+            number, conflict = _resolve_segment_number(online_votes, item["ocr_votes"])
             trusted_number = trusted_numbers.get(id(item))
-            conflict = (
-                trusted_number is None
-                and online_number is not None
-                and ocr_number is not None
-                and ocr_number != online_number
-            )
-            item["conflict"] = conflict
-            number = trusted_number or (
-                None
-                if conflict
-                else item.get("direct_number")
-                or online_number
-                or ocr_number
-            )
+            item["conflict"] = conflict and trusted_number is None
+            number = trusted_number or item.get("direct_number") or number
+            if item["conflict"]:
+                number = None
             item["number"] = number
             if number is not None:
                 for _, player in item["rows"]:
                     if player.get("jersey_number") is None or not _is_number_locked(player):
                         existing = player.get("jersey_number")
                         corrected += existing is not None and existing != number
-                        player["jersey_number"] = number
-                        player["jersey_number_locked"] = True
+                        _set_jersey_number(player, number)
                         added += existing is None
                         round_added += existing is None
 
-        global_added, global_corrected = _propagate_global_number_consensus(records)
+        global_added, global_corrected = _propagate_global_number_consensus(
+            records, global_number_sources
+        )
         added += global_added
         corrected += global_corrected
         round_added += global_added
@@ -430,6 +438,8 @@ def reconcile_jersey_number_records(
 
     local_numbers = {}
     for item in resolved_segments:
+        if item["conflict"]:
+            continue
         players_by_frame = dict(item["rows"])
         votes = item["ocr_votes"]
         vote_start = vote_end = 0
@@ -467,43 +477,12 @@ def reconcile_jersey_number_records(
             ):
                 existing = player.get("jersey_number")
                 corrected += existing is not None and existing != number
-                player["jersey_number"] = number
-                player["jersey_number_locked"] = True
+                _set_jersey_number(player, number)
                 added += existing is None
             if local_id is not None:
                 previous_local[local_id] = (frame_index, player)
 
-    global_numbers = defaultdict(Counter)
-    for record in records:
-        for player in record.get("players", ()):
-            if (
-                player.get("id") is not None
-                and player.get("jersey_number") is not None
-                and _is_number_locked(player)
-            ):
-                global_numbers[player["id"]][str(player["jersey_number"])] += 1
-    demoted = 0
-    for global_id, numbers in global_numbers.items():
-        if len(numbers) < 2:
-            continue
-        number, count = numbers.most_common(1)[0]
-        keep_number = number if count / sum(numbers.values()) >= 0.75 else None
-        for record in records:
-            for player in record.get("players", ()):
-                if player.get("id") != global_id:
-                    continue
-                existing = player.get("jersey_number")
-                if keep_number is not None and not _is_number_locked(player):
-                    corrected += existing is not None and existing != keep_number
-                    player["jersey_number"] = keep_number
-                    player["jersey_number_locked"] = True
-                elif (
-                    _is_number_locked(player)
-                    and (keep_number is None or str(existing) != keep_number)
-                ):
-                    player["jersey_number_locked"] = False
-                    demoted += 1
-
+    # Repeated frames are correlated observations; keep conflicting locks unresolved.
     assign_identity_labels(records)
     identity_labels_changed = any(
         initial_states.get(
@@ -530,7 +509,6 @@ def reconcile_jersey_number_records(
     return JerseyConsensusResult(
         added=added,
         corrected=corrected,
-        demoted=demoted,
         status_changed=status_changed,
         identity_labels_changed=identity_labels_changed,
         labeled=after,

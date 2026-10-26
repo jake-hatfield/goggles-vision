@@ -169,8 +169,14 @@ class CourtMapper:
         self.model_update_attempts = 0
         self.model_update_acceptances = 0
         self.model_update_rejections = {}
+        self._keypoint_history = []
+        self._keypoint_history_frame = None
         self.court_min = self.vertices.min(axis=0)
         self.court_max = self.vertices.max(axis=0)
+        self._court_clip_min = self.court_min - 2.0
+        self._court_clip_max = self.court_max + 2.0
+        self._court_player_min = self.court_min - 0.75
+        self._court_player_max = self.court_max + 0.75
         anchors = np.asarray(
             [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0], [0.5, 0.5], [0.25, 0.5], [0.75, 0.5]],
             np.float32,
@@ -185,6 +191,8 @@ class CourtMapper:
         self.last_camera_motion_frame = -(10**9)
         self.last_stats = self._stats("uninitialized")
         self.pending = None
+        self._keypoint_history.clear()
+        self._keypoint_history_frame = None
 
     @staticmethod
     def _stats(
@@ -208,6 +216,136 @@ class CourtMapper:
         self.model_update_rejections[reason] = self.model_update_rejections.get(reason, 0) + 1
         return False
 
+    def _remember_keypoints(self, frame_index, keypoints, valid):
+        if self._keypoint_history_frame != frame_index:
+            self._keypoint_history.clear()
+            self._keypoint_history_frame = int(frame_index)
+        indices = np.flatnonzero(valid)
+        if len(indices):
+            self._keypoint_history.append(
+                (int(frame_index), indices, keypoints[indices].copy())
+            )
+            del self._keypoint_history[:-48]
+
+    def _fit_keypoints(self, image_points, court_points, frame_shape):
+        height, width = frame_shape[:2]
+        frame_area = max(1.0, float(width * height))
+        stats = self._stats("too_few_points", len(image_points))
+        if len(image_points) < 6:
+            return None, "too_few_points", stats
+        if abs(float(cv2.contourArea(cv2.convexHull(image_points)))) < 0.001 * frame_area:
+            return None, "degenerate_image_layout", stats
+        # Preserve the strict fit unless its consensus is too small.
+        for threshold in (0.5, 1.25):
+            cv2.setRNGSeed(42)
+            homography, mask = cv2.findHomography(
+                image_points, court_points, cv2.RANSAC, threshold
+            )
+            if homography is None or mask is None or not np.isfinite(homography).all():
+                if threshold == 0.5:
+                    continue
+                return None, "homography_failed", stats
+            inliers = mask.reshape(-1).astype(bool)
+            inlier_count = int(inliers.sum())
+            if inlier_count >= 6 and inlier_count / len(image_points) >= 0.7:
+                break
+            if threshold == 0.5:
+                continue
+            stats.update(inliers=inlier_count)
+            return None, "insufficient_consensus", stats
+        inlier_points = image_points[inliers]
+        spread = np.linalg.svd(
+            inlier_points - inlier_points.mean(axis=0), compute_uv=False
+        )
+        inlier_area = abs(float(cv2.contourArea(cv2.convexHull(inlier_points))))
+        if (
+            inlier_area < 0.0005 * frame_area
+            or spread[0] <= 1e-06
+            or spread[1] / spread[0] < 0.025
+        ):
+            stats.update(inliers=inlier_count)
+            return None, "degenerate_inlier_layout", stats
+        projected = cv2.perspectiveTransform(
+            inlier_points.reshape(-1, 1, 2), homography
+        ).reshape(-1, 2)
+        error = float(
+            np.median(np.linalg.norm(projected - court_points[inliers], axis=1))
+        )
+        stats = self._stats("candidate", len(image_points), inlier_count, error)
+        if not np.isfinite(error) or error > 0.5:
+            return None, "large_reprojection_error", stats
+        return (homography, inliers), "candidate", stats
+
+    def _temporal_keypoints(self, frame_shape):
+        if len(self._keypoint_history) < 8:
+            return None
+        frame_ids = np.concatenate(
+            [np.full(len(indices), frame, dtype=np.int64) for frame, indices, _ in self._keypoint_history]
+        )
+        keypoint_ids = np.concatenate([indices for _, indices, _ in self._keypoint_history])
+        image_points = np.concatenate([points for _, _, points in self._keypoint_history])
+        if len(np.unique(frame_ids)) < 8 or len(image_points) < 12:
+            return None
+        court_points = self.vertices[keypoint_ids]
+        cv2.setRNGSeed(42)
+        homography, mask = cv2.findHomography(
+            image_points,
+            court_points,
+            cv2.RANSAC,
+            1.0,
+            maxIters=5000,
+            confidence=0.999,
+        )
+        if homography is None or mask is None or not np.isfinite(homography).all():
+            return None
+        projected = cv2.perspectiveTransform(
+            image_points.reshape(-1, 1, 2), homography
+        ).reshape(-1, 2)
+        inliers = mask.reshape(-1).astype(bool)
+        inliers &= np.linalg.norm(projected - court_points, axis=1) <= 1.0
+        selected_ids = []
+        selected_points = []
+        for keypoint_id in np.unique(keypoint_ids):
+            same_keypoint = keypoint_ids == keypoint_id
+            selected = same_keypoint & inliers
+            support = int(selected.sum())
+            if (
+                support < 2
+                or support / int(same_keypoint.sum()) < 0.5
+                or len(np.unique(frame_ids[selected])) < 2
+            ):
+                continue
+            selected_ids.append(int(keypoint_id))
+            selected_points.append(np.median(image_points[selected], axis=0))
+        if len(selected_ids) < 6:
+            return None
+        points = np.asarray(selected_points, dtype=np.float32)
+        candidate, reason, stats = self._fit_keypoints(
+            points, self.vertices[selected_ids], frame_shape
+        )
+        if candidate is None:
+            return None
+        return candidate, reason, stats
+
+    def _advance_keypoint_history(self, warp, source_frame, frame_index):
+        if self._keypoint_history:
+            if (
+                source_frame is None
+                or self._keypoint_history_frame != int(source_frame)
+            ):
+                self._keypoint_history.clear()
+            else:
+                affine = np.asarray(warp, dtype=np.float32)
+                self._keypoint_history = [
+                    (
+                        observation_frame,
+                        indices,
+                        cv2.transform(points.reshape(1, -1, 2), affine).reshape(-1, 2),
+                    )
+                    for observation_frame, indices, points in self._keypoint_history
+                ]
+        self._keypoint_history_frame = int(frame_index)
+
     @staticmethod
     def _project_court_to_image(homography, points):
         ok, inverse = cv2.invert(np.asarray(homography, dtype=np.float64))
@@ -218,32 +356,20 @@ class CourtMapper:
 
     @classmethod
     def _is_direction_flip(cls, current_anchors, previous_anchors, frame_shape):
-        visible = cls._visible_anchor_mask(current_anchors, previous_anchors, frame_shape)
-        compared = visible if int(visible.sum()) >= 2 else np.ones(len(current_anchors), dtype=bool)
         direct_shift = float(
-            np.median(np.linalg.norm(current_anchors[compared] - previous_anchors[compared], axis=1))
+            np.median(cls._anchor_displacements(current_anchors, previous_anchors, frame_shape))
         )
         orders = ([1, 0, 3, 2, 4, 6, 5], [2, 3, 0, 1, 4, 6, 5])
-        flipped_shifts = []
-        for order in orders:
-            flipped_anchors = previous_anchors[list(order)]
-            flipped_visible = cls._visible_anchor_mask(current_anchors, flipped_anchors, frame_shape)
-            flipped_compared = (
-                flipped_visible
-                if int(flipped_visible.sum()) >= 2
-                else np.ones(len(current_anchors), dtype=bool)
-            )
-            flipped_shifts.append(
-                float(
-                    np.median(
-                        np.linalg.norm(
-                            current_anchors[flipped_compared] - flipped_anchors[flipped_compared],
-                            axis=1,
-                        )
+        flipped_shift = min(
+            float(
+                np.median(
+                    cls._anchor_displacements(
+                        current_anchors, previous_anchors[list(order)], frame_shape
                     )
                 )
             )
-        flipped_shift = min(flipped_shifts)
+            for order in orders
+        )
         return flipped_shift + 25.0 < direct_shift
 
     def _confirm_reacquire(self, anchors, frame_index, frame_shape):
@@ -251,9 +377,7 @@ class CourtMapper:
         if self.pending is not None:
             previous, previous_frame, previous_count = self.pending
             anchors = np.asarray(anchors, dtype=np.float32)
-            visible = self._visible_anchor_mask(anchors, previous, frame_shape)
-            compared = visible if int(visible.sum()) >= 2 else np.ones(len(anchors), dtype=bool)
-            shift = np.linalg.norm(anchors[compared] - previous[compared], axis=1)
+            shift = self._anchor_displacements(anchors, previous, frame_shape)
             scale = max(frame_shape[:2])
             consistent = frame_index - previous_frame <= self.max_pending_gap and np.isfinite(shift).all()
             consistent &= np.median(shift) <= max(
@@ -287,6 +411,12 @@ class CourtMapper:
 
         return inside(np.asarray(current)) | inside(np.asarray(previous))
 
+    @classmethod
+    def _anchor_displacements(cls, current, previous, frame_shape):
+        visible = cls._visible_anchor_mask(current, previous, frame_shape)
+        compared = visible if int(visible.sum()) >= 2 else np.ones(len(current), dtype=bool)
+        return np.linalg.norm(current[compared] - previous[compared], axis=1)
+
     def update(
         self,
         keypoints: np.ndarray | None,
@@ -314,44 +444,21 @@ class CourtMapper:
         valid &= scores >= 0.3
         valid &= (keypoints[:, 0] >= 0) & (keypoints[:, 0] < width)
         valid &= (keypoints[:, 1] >= 0) & (keypoints[:, 1] < height)
+        self._remember_keypoints(frame_index, keypoints, valid)
         image_points = keypoints[valid]
         court_points = self.vertices[valid]
-        self.last_stats = self._stats("too_few_points", len(image_points))
-        if len(image_points) < 6:
-            return self._reject("too_few_points", valid=len(image_points))
-        frame_area = max(1.0, float(width * height))
-        if (
-            abs(float(cv2.contourArea(cv2.convexHull(image_points))))
-            < 0.001 * frame_area
-        ):
-            return self._reject("degenerate_image_layout")
-        cv2.setRNGSeed(42)
-        homography, mask = cv2.findHomography(
-            image_points, court_points, cv2.RANSAC, 0.5
+        candidate, reason, stats = self._fit_keypoints(
+            image_points, court_points, frame_shape
         )
-        if homography is None or mask is None or not np.isfinite(homography).all():
-            return self._reject("homography_failed")
-        inliers = mask.reshape(-1).astype(bool)
-        inlier_count = int(inliers.sum())
-        if (
-            inlier_count < 6
-            or inlier_count / len(image_points) < 0.7
-        ):
-            return self._reject("insufficient_consensus", inliers=inlier_count)
-        inlier_points = image_points[inliers]
-        spread = np.linalg.svd(inlier_points - inlier_points.mean(axis=0), compute_uv=False)
-        inlier_area = abs(float(cv2.contourArea(cv2.convexHull(inlier_points))))
-        if (
-            inlier_area < 0.0005 * frame_area
-            or spread[0] <= 1e-06
-            or spread[1] / spread[0] < 0.025
-        ):
-            return self._reject("degenerate_inlier_layout")
-        projected = cv2.perspectiveTransform(inlier_points.reshape(-1, 1, 2), homography).reshape(-1, 2)
-        error = float(np.median(np.linalg.norm(projected - court_points[inliers], axis=1)))
-        self.last_stats = self._stats("candidate", len(image_points), inlier_count, error)
-        if not np.isfinite(error) or error > 0.5:
-            return self._reject("large_reprojection_error")
+        if candidate is None and not map_was_recent:
+            temporal = self._temporal_keypoints(frame_shape)
+            if temporal is not None:
+                candidate, reason, stats = temporal
+        if candidate is None:
+            self.last_stats = stats
+            return self._reject(reason)
+        homography, _ = candidate
+        self.last_stats = stats
         if abs(float(homography[2, 2])) > 1e-09:
             homography /= homography[2, 2]
         anchors = self._project_court_to_image(homography, self.anchor_points)
@@ -421,12 +528,7 @@ class CourtMapper:
     ) -> bool:
         """Carry the court map through a validated previous-to-current affine warp."""
         frame_index = int(frame_index)
-        if (
-            self.homography is None
-            or source_frame is None
-            or int(source_frame) != self.last_valid_frame
-            or frame_index <= self.last_camera_motion_frame
-        ):
+        if source_frame is None or frame_index <= self.last_camera_motion_frame:
             return False
         warp = np.asarray(warp, dtype=np.float64)
         if warp.shape != (2, 3) or not np.isfinite(warp).all():
@@ -434,6 +536,10 @@ class CourtMapper:
         image_warp = np.eye(3, dtype=np.float64)
         image_warp[:2] = warp
         if abs(float(np.linalg.det(image_warp[:2, :2]))) < 1e-6:
+            return False
+        self._advance_keypoint_history(warp, source_frame, frame_index)
+        self.last_camera_motion_frame = frame_index
+        if self.homography is None or int(source_frame) != self.last_valid_frame:
             return False
         try:
             homography = self.homography @ np.linalg.inv(image_warp)
@@ -446,7 +552,6 @@ class CourtMapper:
             return False
         self.homography = homography
         self.last_valid_frame = frame_index
-        self.last_camera_motion_frame = frame_index
         if self.pending is not None:
             pending_anchors, _, confirmations = self.pending
             transformed = cv2.transform(
@@ -476,19 +581,22 @@ class CourtMapper:
             return None
         max_age = COURT_MAP_MAX_AGE_FRAMES if allow_stale else 0
         age = int(frame_index) - self.last_valid_frame
-        if age < 0 or age > max_age or not self.is_recent(frame_index):
+        if age < 0 or age > max_age:
             return None
         point = np.asarray(point, dtype=np.float32).reshape(1, 1, 2)
         if not np.isfinite(point).all():
             return None
         mapped = cv2.perspectiveTransform(point, self.homography).reshape(2)
-        lower = self.court_min - 2.0
-        upper = self.court_max + 2.0
-        if not np.isfinite(mapped).all() or np.any(mapped < lower) or np.any(mapped > upper):
+        if (
+            not np.isfinite(mapped).all()
+            or np.any(mapped < self._court_clip_min)
+            or np.any(mapped > self._court_clip_max)
+        ):
             return None
         if clip:
             mapped = np.clip(mapped, self.court_min, self.court_max)
         return mapped.astype(np.float32)
+
 
 def update_court_state(
     track: Any,
@@ -501,7 +609,9 @@ def update_court_state(
     """Smooth a local track's court position while rejecting implausible jumps."""
     if not court_mapper.is_recent(frame_index):
         return
-    observation = court_mapper.transform(get_player_ground_point(track, pose), frame_index, allow_stale=True)
+    observation = court_mapper.transform(
+        get_player_ground_point(track, pose), frame_index, allow_stale=True
+    )
     if observation is None:
         return
     if state.court_observation is None or state.court_position is None:
@@ -542,10 +652,11 @@ def is_player_on_court(
             allow_stale=True,
             clip=False,
         )
-        margin = 0.75
         return court_point is not None and bool(
-            np.all(court_point >= mapper.court_min - margin)
-            and np.all(court_point <= mapper.court_max + margin)
+            np.all(
+                (court_point >= mapper._court_player_min)
+                & (court_point <= mapper._court_player_max)
+            )
         )
     x1, _, x2, y2 = map(float, track.box)
     height_px, width_px = frame_shape[:2]

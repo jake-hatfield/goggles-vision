@@ -10,6 +10,11 @@
 
 ## 最新更新
 
+**2026-10-26**
+- **升级球员姿态推理：** 用项目内的纯 PyTorch RTMPose-S 替换整帧 YOLOv8n-Pose，复用现有人体检测框批量估计 ROI 姿态，避免重复进行整帧人物检测。
+- **提升场地映射可靠性：** 使用项目训练的 MobileNetV4-Conv-Small 场地关键点模型替换 YOLO26s，并增加可见性分数（896×512；PCK@10 为 88.17%，PCK@20 为 94.26%）。短时关键点历史与相机运动补偿有助于在关键点稀疏时保持迷你地图连续性。
+- **降低球衣号码误识别：** 微调后的 SVTRv2-B 使用 CTC 空白输出和置信度过滤，拒绝无法可靠识别的图片。
+
 **2026-10-20**
 - **更新篮球检测模型：** RF-DETR 权重新增 `ball-in-basket` 类别，为投篮结果判断提供视觉线索。
 - **优化球场映射：** 通过单应矩阵校验、失效重定位和相机运动补偿提升映射稳定性。
@@ -62,7 +67,7 @@ OpenHoopVision 使用专门的检测器识别篮球动作和控球变化，再�
 | 指标 | 结果 |
 | --- | --- |
 | RF-DETR 检测器（`Basketball-Detection-v6`） | mAP@0.5：84.9%；mAP@0.5:0.95：62.3% |
-| YOLO26s 场地姿态模型（`court-detection-v2`） | mAP@0.5：96.8%；mAP@0.5:0.95：81.1% |
+| MobileNetV4-Conv-Small 场地关键点模型（`court-detection-v2`，896×512） | PCK@10：88.17%；PCK@20：94.26% |
 | 端到端投篮流水线（`basketball-event-recognition`） | 精确率：85.51%；召回率：83.10%；F1：84.29%；球队归属准确率：84.75%（50/59） |
 | Shot made（融合 `ball-in-basket`） | 精确率：89.13%；召回率：82.00%；F1：85.42% |
 
@@ -98,11 +103,9 @@ python -m pip install -e . --no-deps
 | --- | --- |
 | 篮球检测器 | `weights/rf-detr-basketball.pth` |
 | 球员姿态模型 | `weights/rtmpose-s_simcc-aic-coco.pth` |
-| 场地姿态模型 | `weights/yolo26s-pose-court-33kp.pt` |
+| 场地姿态模型 | `weights/court_mobilenetv4_896x512.pt` |
 | 球员 ReID | [`weights/osnet_x1_0_msmt17.pt`](https://github.com/KaiyangZhou/deep-person-reid) — Torchreid MSMT17 OSNet x1.0 |
-| 球衣号码 OCR | `weights/basketball_jersey_number.ckpt` |
-
-球员姿态推理使用项目内的纯 PyTorch RTMPose-S 实现，不需要安装 MMPose 或 MMCV。
+| 球衣号码 OCR | 微调后的 SVTRv2-B，权重位于 `weights/basketball_jersey_number.ckpt` |
 
 ### 分析视频
 
@@ -146,7 +149,7 @@ python main.py --video {your_video}.mp4
 
 [RF-DETR](https://github.com/roboflow/rf-detr) — 用于加载篮球检测器权重的目标检测框架。
 
-[Ultralytics](https://github.com/ultralytics/ultralytics) — YOLO 运行时，用于加载球员 [YOLOv8 姿态模型](https://docs.ultralytics.com/models/yolov8/) 和场地 [YOLO26 姿态模型](https://docs.ultralytics.com/models/yolo26/) 权重。
+[timm](https://github.com/huggingface/pytorch-image-models) — [`models/court.py`](models/court.py) 中本地实现的 MobileNetV4-Conv-Small 配置参考来源。
 
 [McByte++](https://github.com/tstanczyk95/McBytePlusPlus) — 本地跟踪实现的参考来源。
 
@@ -154,8 +157,8 @@ python main.py --video {your_video}.mp4
 
 [OSNet / Torchreid](https://github.com/KaiyangZhou/deep-person-reid) — 在 [`models/appearance.py`](models/appearance.py) 中改编的 OSNet x1.0 架构。
 
-[PARSeq](https://github.com/baudm/parseq) — 在 [`models/jersey_number.py`](models/jersey_number.py) 中改编、用于球衣号码识别的 OCR 架构。
+[OpenOCR](https://github.com/Topdu/OpenOCR) — [`models/jersey_number.py`](models/jersey_number.py) 中 SVTRv2-B OCR 架构的改编来源，用于识别球衣号码。
 
 ## 许可证
 
-OpenHoopVision 的原创代码和项目训练的模型文件依据 [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0) 发布。第三方模型、代码和依赖仍遵循各自的许可证，其中包括 [Ultralytics 的 AGPL-3.0 许可证](https://github.com/ultralytics/ultralytics/blob/main/LICENSE)。演示动图由网上视频截取制作，原视频仍受各自版权和相关条款约束。
+OpenHoopVision 的原创代码和项目训练的模型文件依据 [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0) 发布。第三方模型、代码和依赖仍遵循各自的许可证。演示动图由网上视频截取制作，原视频仍受各自版权和相关条款约束。

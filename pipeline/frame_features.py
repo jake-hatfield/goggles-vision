@@ -144,25 +144,43 @@ class FrameFeatureBuilder:
             global_id = global_ids.get(local_id)
             eligible_for_reid = local_id in ctx.reid_track_ids
             player_feature["reid_eligible"] = bool(eligible_for_reid)
+            local_state = self.state.identity_resolver.local_tracks.get(local_id)
+            identity_uncertain = eligible_for_reid and (
+                self.state.frame_index,
+                local_id,
+            ) in self.state.jersey_sampler.identity_uncertain_refs
             player_feature["id"] = (
                 int(global_id)
-                if eligible_for_reid and global_id is not None
+                if eligible_for_reid and global_id is not None and not identity_uncertain
                 else None
             )
             team_id = self.state.identity_resolver.get_team_id(local_id) if eligible_for_reid else None
             player_feature["team"] = team_id
             player_feature["team_semantic"] = normalize_team(team_id)
-            jersey_number = self.state.identity_resolver.get_jersey_number(local_id) if eligible_for_reid else None
+            jersey_number = (
+                self.state.identity_resolver.get_jersey_number(local_id)
+                if eligible_for_reid and not identity_uncertain
+                else None
+            )
             player_feature["jersey_number"] = jersey_number
-            player_feature["jersey_number_candidate"] = jersey_number
+            player_feature["jersey_number_candidate"] = (
+                local_state.jersey_candidate
+                if eligible_for_reid and local_state is not None
+                else None
+            )
             player_feature["jersey_number_locked"] = (
-                self.state.identity_resolver.is_jersey_number_locked(local_id) if eligible_for_reid else False
+                self.state.identity_resolver.is_jersey_number_locked(local_id)
+                if eligible_for_reid and not identity_uncertain
+                else False
             )
-            player_feature["identity_label"] = (
-                self.state.identity_resolver.get_identity_label(local_id, global_id)
-                if eligible_for_reid
-                else f"R{local_id}"
-            )
+            if identity_uncertain:
+                player_feature["identity_label"] = None
+            elif eligible_for_reid:
+                player_feature["identity_label"] = (
+                    self.state.identity_resolver.get_identity_label(local_id, global_id)
+                )
+            else:
+                player_feature["identity_label"] = f"R{local_id}"
             if team_id is not None and team_colors is not None:
                 box_color = tuple(map(int, team_colors[team_id]))
             ctx.player_box_colors[local_id] = box_color

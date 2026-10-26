@@ -1,6 +1,5 @@
 from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
-from pathlib import Path
 from typing import Any
 
 
@@ -41,33 +40,6 @@ class CudaInferenceExecutor:
     def close(self) -> None:
         if self.executor is not None:
             self.executor.shutdown(wait=True, cancel_futures=True)
-
-
-class _YoloModelAdapter:
-    """Share YOLO loading and inference lifecycle across YOLO model adapters."""
-
-    def __init__(self, checkpoint: str | Path, image_size: int, device: int | str) -> None:
-        from ultralytics import YOLO
-
-        self.model = YOLO(str(checkpoint))
-        self.image_size = image_size
-        self.device = device
-        self.inference = CudaInferenceExecutor(device, self.detect)
-
-    def detect(self, frame: Any) -> Any:
-        raise NotImplementedError
-
-    def start(self) -> None:
-        self.inference.start()
-
-    def submit(self, frame: Any) -> Future[Any] | None:
-        return self.inference.submit(frame)
-
-    def result(self, future: Future[Any] | None, frame: Any) -> Any:
-        return self.inference.result(future, frame)
-
-    def close(self) -> None:
-        self.inference.close()
 
 
 __all__ = ["CudaInferenceExecutor"]

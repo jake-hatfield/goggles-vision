@@ -78,7 +78,40 @@ def _same_path(first: Path, second: Path) -> bool:
         return False
 
 
-def _save_records(tracks_path: Path, records: list[dict[str, Any]], resolver: Any) -> None:
+def _clear_uncertain_identity(
+    records: list[dict[str, Any]], refs: set[tuple[int, int]]
+) -> int:
+    changed = 0
+    for record in records:
+        frame_index = int(record.get("frame", 0))
+        for player in record.get("players", ()):
+            local_id = player.get("local_track_id")
+            if local_id is None or (frame_index, int(local_id)) not in refs:
+                continue
+            label = f"R{int(local_id)}"
+            changed += any(
+                (
+                    player.get("id") is not None,
+                    player.get("jersey_number") is not None,
+                    player.get("jersey_number_candidate") is not None,
+                    bool(player.get("jersey_number_locked")),
+                    player.get("identity_label") != label,
+                )
+            )
+            player["id"] = None
+            player["jersey_number"] = None
+            player["jersey_number_candidate"] = None
+            player["jersey_number_locked"] = False
+            player["identity_label"] = label
+    return changed
+
+
+def _save_records(
+    tracks_path: Path,
+    records: list[dict[str, Any]],
+    resolver: Any,
+    identity_uncertain_refs: set[tuple[int, int]],
+) -> None:
     tracks_tmp = tracks_path.with_name(tracks_path.name + ".tmp")
     try:
         with open(tracks_path, encoding="utf-8") as source, open(
@@ -92,6 +125,7 @@ def _save_records(tracks_path: Path, records: list[dict[str, Any]], resolver: An
                 record["players"] = records[index].get("players", [])
                 if resolver.identity_aliases:
                     reconcile_identity_records([record], resolver)
+                _clear_uncertain_identity([record], identity_uncertain_refs)
                 destination.write(json.dumps(record, ensure_ascii=False) + "\n")
                 record_count += 1
             if record_count != len(records):
@@ -110,7 +144,10 @@ def finalize_identity_records(
     label_for_player: Callable[[dict[str, Any]], str],
 ) -> None:
     """Reconcile cached jersey evidence, persist JSONL changes, and redraw when needed."""
-    has_identity_aliases = bool(resolver.identity_aliases)
+    has_identity_history_changes = bool(
+        resolver.identity_aliases
+        or getattr(resolver, "identity_segment_split_count", 0)
+    )
     records: list[dict[str, Any]] = []
     initial_states: dict[tuple[int, Any, int], tuple[bool, Any, str, tuple[Any, Any]]] = {}
     history_label_changed = False
@@ -135,7 +172,7 @@ def finalize_identity_records(
                     (player.get("team"), player.get("team_semantic")),
                 )
 
-            if has_identity_aliases:
+            if has_identity_history_changes:
                 reconciled_observations += reconcile_identity_records([record], resolver)
                 assign_identity_labels([record])
                 for player_index, player in enumerate(record.get("players", ())):
@@ -147,30 +184,50 @@ def finalize_identity_records(
                     )
             records.append(record)
 
-    if has_identity_aliases:
+    if has_identity_history_changes:
         print(
             f"ReID history reconciliation: {reconciled_observations} player observations across "
-            f"{resolver.identity_relink_count} relinks"
+            f"{resolver.identity_relink_count} relinks and "
+            f"{resolver.identity_segment_split_count} segment splits"
         )
 
+    identity_uncertain_refs = getattr(sampler, "identity_uncertain_refs", set())
+    predictions = {
+        ref: prediction
+        for ref, prediction in sampler.predictions.items()
+        if ref not in identity_uncertain_refs
+    }
+    digit_predictions = {
+        ref: prediction
+        for ref, prediction in sampler.digit_predictions.items()
+        if ref[:2] not in identity_uncertain_refs
+    }
     result = reconcile_jersey_number_records(
-        records,
-        sampler.predictions,
-        sampler.digit_predictions,
-        initial_states,
+        records, predictions, digit_predictions, initial_states
     )
-    changed = bool(result.added or result.corrected or result.demoted or result.status_changed)
-    if not changed and not has_identity_aliases:
+    uncertain_changes = _clear_uncertain_identity(records, identity_uncertain_refs)
+    changed = bool(
+        result.added
+        or result.corrected
+        or result.status_changed
+        or uncertain_changes
+    )
+    if not changed and not has_identity_history_changes:
         print(f"jersey track consensus: {result.labeled}/{result.total_players} labeled")
         return
 
-    _save_records(tracks_path, records, resolver)
+    _save_records(tracks_path, records, resolver, identity_uncertain_refs)
     if rewrite_overlay is not None and (changed or history_label_changed):
         previous_overlay_labels = {key: state[2] for key, state in initial_states.items()}
         rewrite_overlay(records, previous_overlay_labels)
+    labeled = sum(
+        player.get("jersey_number") is not None
+        for record in records
+        for player in record.get("players", ())
+    )
     print(
-        f"jersey track consensus: {result.labeled}/{result.total_players} labeled; "
-        f"added={result.added}, corrected={result.corrected}, ambiguous labels demoted={result.demoted}"
+        f"jersey track consensus: {labeled}/{result.total_players} labeled; "
+        f"added={result.added}, corrected={result.corrected}"
     )
 
 
@@ -224,7 +281,7 @@ def _print_video_summary(run: VideoAnalysisContext) -> None:
         f"matches={run.identity_resolver.match_count}, "
         f"history relinks={run.identity_resolver.identity_relink_count}, "
         f"team switch splits={run.identity_resolver.team_switch_split_count}, "
-        f"OCR lock resets={run.identity_resolver.jersey_conflict_reset_count}, "
+        f"withheld identity observations={len(run.jersey_sampler.identity_uncertain_refs)}, "
         f"total={run.identity_resolver.total_reid_ms:.1f}ms"
     )
     jersey_reader = run.jersey_sampler.reader
@@ -234,7 +291,7 @@ def _print_video_summary(run: VideoAnalysisContext) -> None:
         else "loaded" if jersey_reader.model is not None else "not needed"
     )
     print(
-        f"PARSeq jersey OCR: {jersey_status}; samples={jersey_reader.observations}, "
+        f"SVTRv2-B jersey OCR: {jersey_status}; samples={jersey_reader.observations}, "
         f"accepted reads={jersey_reader.accepted}, "
         f"confirmed G labels={run.identity_resolver.jersey_confirmation_count}"
         f", provisional numbers={run.identity_resolver.jersey_candidate_count}, "
@@ -331,7 +388,7 @@ class VideoAnalysisRunner:
         device = 0 if torch.cuda.is_available() else "cpu"
         player_pose = RTMPosePlayerEstimator(args.pose_checkpoint, args.pose_batch_size, device)
         self._processing_cleanup.callback(player_pose.close)
-        court_pose = CourtPoseDetector(args.court_model, args.court_imgsz, device)
+        court_pose = CourtPoseDetector(args.court_model, device)
         self._processing_cleanup.callback(court_pose.close)
         team_classifier = JerseyTeamClassifier()
         iou_metric = IoU()
@@ -357,8 +414,17 @@ class VideoAnalysisRunner:
         court_map = CourtMiniMap(width, height) if writer is not None else None
         ball_tracker = ShotBallTracker(fps, args.trail_length)
         holder_state = HolderState(args.holder_hold_frames)
-        identity_resolver = IdentityResolver({"weights": str(args.reid_model)}, fps, resolver_device, team_classifier)
-        jersey_reader = JerseyNumberReader({"checkpoint": args.jersey_ocr_model}, resolver_device)
+        jersey_ocr_parameters = {"min_read_confidence": 0.85}
+        identity_resolver = IdentityResolver(
+            {"weights": str(args.reid_model), "jersey_ocr": jersey_ocr_parameters},
+            fps,
+            resolver_device,
+            team_classifier,
+        )
+        jersey_reader = JerseyNumberReader(
+            {"checkpoint": args.jersey_ocr_model, **jersey_ocr_parameters},
+            resolver_device,
+        )
         jersey_sampler = JerseyNumberSampler(jersey_reader)
         event_pipeline = BallEventPipeline(fps)
         start_time = time.perf_counter()

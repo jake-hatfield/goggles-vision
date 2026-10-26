@@ -85,18 +85,39 @@ def canonicalize_global_identity_references(
 
 
 def reconcile_identity_records(records: list[dict[str, Any]], resolver: Any) -> int:
-    """Apply accepted ReID merges to earlier player rows and event references."""
+    """Apply ReID history while keeping each global ID unique within a frame."""
     changed_observations = 0
     for record in records:
         frame_index = int(record.get("frame", 0))
-        for player in record.get("players", ()):
+        players = record.get("players", ())
+        resolved_ids = [
+            None
+            if player.get("local_track_id") is None or player.get("reid_eligible") is False
+            else resolver.get_global_id_at(int(player["local_track_id"]), frame_index)
+            for player in players
+        ]
+        owners = {}
+        for index, (player, global_id) in enumerate(zip(players, resolved_ids)):
+            if global_id is None:
+                continue
+            rank = (
+                player.get("id") == global_id,
+                bool(player.get("jersey_number_locked")),
+                float(player.get("score") or 0.0),
+                -index,
+            )
+            if global_id not in owners or rank > owners[global_id][0]:
+                owners[global_id] = (rank, index)
+
+        for index, (player, global_id) in enumerate(zip(players, resolved_ids)):
             local_id = player.get("local_track_id")
             if local_id is None:
                 continue
             if player.get("reid_eligible") is False:
                 player["id"] = None
                 continue
-            global_id = resolver.get_global_id_at(int(local_id), frame_index)
+            if global_id is not None and owners[global_id][1] != index:
+                global_id = None
             if player.get("id") != global_id:
                 player["id"] = global_id
                 changed_observations += 1

@@ -10,6 +10,11 @@
 
 ## Latest Updates
 
+**2026-10-26**
+- **Upgraded player pose inference:** Replaced full-frame YOLOv8n-Pose with standalone PyTorch RTMPose-S, batching pose estimation on the existing detector's person boxes to avoid redundant full-frame person detection.
+- **More reliable court mapping:** Replaced YOLO26s with a project-trained MobileNetV4-Conv-Small court-keypoint model with visibility scores (896×512; PCK@10 88.17%, PCK@20 94.26%). Short-term keypoint history and camera-motion compensation help maintain mini-map continuity when detections are sparse.
+- **Safer jersey OCR:** Fine-tuned SVTRv2-B uses CTC blank outputs and confidence filtering to reject unreadable crops instead of assigning unreliable numbers.
+
 **2026-10-20**
 - **Updated basketball detector:** The RF-DETR checkpoint adds `ball-in-basket` as a visual cue for shot-outcome detection.
 - **Improved court mapping:** Homography validation, reacquisition, and camera-motion compensation improve mapping stability.
@@ -62,7 +67,7 @@ The shot detector uses ball motion and rim evidence to distinguish shots from dr
 | Metric | Result |
 | --- | --- |
 | RF-DETR detector (`Basketball-Detection-v6`) | mAP@0.5: 84.9%; mAP@0.5:0.95: 62.3% |
-| YOLO26s court pose (`court-detection-v2`) | mAP@0.5: 96.8%; mAP@0.5:0.95: 81.1% |
+| MobileNetV4-Conv-Small court keypoints (`court-detection-v2`, 896×512) | PCK@10: 88.17%; PCK@20: 94.26% |
 | End-to-end shot pipeline (`basketball-event-recognition`) | Precision: 85.51%; recall: 83.10%; F1: 84.29%; team attribution accuracy: 84.75% (50/59). |
 | Shot made (with `ball-in-basket`) | Precision: 89.13%; recall: 82.00%; F1: 85.42%. |
 
@@ -98,11 +103,9 @@ The default checkpoint paths are relative to the project directory:
 | --- | --- |
 | Basketball detector | `weights/rf-detr-basketball.pth` |
 | Player pose | `weights/rtmpose-s_simcc-aic-coco.pth` |
-| Court pose | `weights/yolo26s-pose-court-33kp.pt` |
+| Court pose | `weights/court_mobilenetv4_896x512.pt` |
 | Player ReID | [`weights/osnet_x1_0_msmt17.pt`](https://github.com/KaiyangZhou/deep-person-reid) — Torchreid MSMT17 OSNet x1.0 |
-| Jersey-number OCR | `weights/basketball_jersey_number.ckpt` |
-
-Player pose inference uses a standalone PyTorch RTMPose-S implementation and does not require MMPose or MMCV.
+| Jersey-number OCR | SVTRv2-B fine-tuned checkpoint at `weights/basketball_jersey_number.ckpt` |
 
 ### Analyze a Video
 
@@ -148,7 +151,7 @@ Coming soon...
 
 [RF-DETR](https://github.com/roboflow/rf-detr) — object-detection framework used to load the basketball detector checkpoint.
 
-[Ultralytics](https://github.com/ultralytics/ultralytics) — YOLO runtime for the [YOLOv8 pose](https://docs.ultralytics.com/models/yolov8/) player checkpoint and [YOLO26](https://docs.ultralytics.com/models/yolo26/) court-pose checkpoint.
+[timm](https://github.com/huggingface/pytorch-image-models) — source for the MobileNetV4-Conv-Small configuration reimplemented locally in [`models/court.py`](models/court.py).
 
 [McByte++](https://github.com/tstanczyk95/McBytePlusPlus) — acknowledged as a source for the local tracking implementation.
 
@@ -156,8 +159,8 @@ Coming soon...
 
 [OSNet / Torchreid](https://github.com/KaiyangZhou/deep-person-reid) — the OSNet x1.0 architecture adapted in [`models/appearance.py`](models/appearance.py).
 
-[PARSeq](https://github.com/baudm/parseq) — OCR architecture adapted in [`models/jersey_number.py`](models/jersey_number.py) for jersey-number recognition.
+[OpenOCR](https://github.com/Topdu/OpenOCR) — source for the SVTRv2-B OCR architecture adapted in [`models/jersey_number.py`](models/jersey_number.py) for jersey-number recognition.
 
 ## License
 
-OpenHoopVision's original code and project-trained model artifacts are licensed under the [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0). Third-party models, code, and dependencies remain subject to their respective licenses, including [Ultralytics' AGPL-3.0 license](https://github.com/ultralytics/ultralytics/blob/main/LICENSE). The demo GIFs are previews derived from videos found online; the original footage remains subject to its respective copyright and terms.
+OpenHoopVision's original code and project-trained model artifacts are licensed under the [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0). Third-party models, code, and dependencies remain subject to their respective licenses. The demo GIFs are previews derived from videos found online; the original footage remains subject to its respective copyright and terms.

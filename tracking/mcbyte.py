@@ -143,12 +143,60 @@ class ORBCameraMotion:
         self.detector = cv2.FastFeatureDetector_create(20)
         self.extractor = cv2.ORB_create()
         self.matcher = cv2.BFMatcher(cv2.NORM_HAMMING)
+        self.matcher_backend = "opencv_cpu"
+        self._torch = None
+        self._previous_torch_descriptors = self._previous_torch_bits = None
+        try:
+            import torch
+
+            if torch.cuda.is_available():
+                self._torch = torch
+                device = torch.device("cuda:0")
+                values = torch.arange(256, device=device, dtype=torch.int64)
+                shifts = torch.arange(8, device=device, dtype=torch.int64)
+                bits = ((values[:, None] >> shifts[None, :]) & 1).to(torch.float16)
+                self._bit_table = (bits * 2 - 1).contiguous()
+                self.matcher_backend = "pytorch_cuda_gemm"
+        except (ImportError, OSError, RuntimeError):
+            self._torch = None
         self.previous_points = None
         self.previous_descriptors = None
         self.applied = 0
         self.rejected = 0
         self.skipped = 0
         self.last_estimate_valid = False
+
+    def _encode_descriptors(self, descriptors):
+        raw = self._torch.from_numpy(np.ascontiguousarray(descriptors)).to(
+            device="cuda:0",
+            dtype=self._torch.uint8,
+        )
+        return self._bit_table[raw.long()].reshape(len(descriptors), 256).contiguous()
+
+    def _knn_match(self, query, train):
+        if self._torch is None or len(query) == 0 or len(train) < 2:
+            return self.matcher.knnMatch(query, train, 2)
+        try:
+            with self._torch.inference_mode():
+                query_bits = (
+                    self._previous_torch_bits
+                    if self._previous_torch_descriptors is query and self._previous_torch_bits is not None
+                    else self._encode_descriptors(query)
+                )
+                train_bits = self._encode_descriptors(train)
+                distances = (256 - (query_bits @ train_bits.T).short()) // 2
+                top_distances, top_indices = self._torch.topk(distances, 2, dim=1, largest=False, sorted=True)
+                indices, distances = top_indices.cpu().numpy(), top_distances.cpu().numpy()
+            self._previous_torch_descriptors, self._previous_torch_bits = train, train_bits
+            return [
+                [cv2.DMatch(i, int(index), 0, float(distance)) for index, distance in zip(row, row_distances)]
+                for i, (row, row_distances) in enumerate(zip(indices, distances))
+            ]
+        except RuntimeError:
+            self._torch = None
+            self.matcher_backend = "opencv_cpu_fallback"
+            self._previous_torch_descriptors = self._previous_torch_bits = self._bit_table = None
+            return self.matcher.knnMatch(query, train, 2)
 
     def estimate(self, frame, detections):
         self.last_estimate_valid = False
@@ -172,7 +220,7 @@ class ORBCameraMotion:
             matches = []
             displacements = []
             max_distance = 0.25 * np.asarray((small_w, small_h), dtype=np.float32)
-            for pair in self.matcher.knnMatch(self.previous_descriptors, descriptors, 2):
+            for pair in self._knn_match(self.previous_descriptors, descriptors):
                 if len(pair) != 2 or pair[0].distance >= 0.9 * pair[1].distance:
                     continue
                 match = pair[0]
