@@ -8,7 +8,9 @@ import cv2
 
 from render.primitives import draw_box
 from render.label import player_overlay_label, text_dimensions
+from render.minimap import CourtMiniMap
 from render.writer import FfmpegVideoWriter
+from tracking.team import normalize_team
 
 
 def rewrite_identity_overlay(
@@ -21,7 +23,7 @@ def rewrite_identity_overlay(
     *,
     player_box_colors: list[dict[int, tuple[int, int, int]]] | None = None,
 ) -> None:
-    """Rewrite output frames with reconciled team colors and player labels."""
+    """Rewrite player labels and mini-map numbers after identity reconciliation."""
     previous_labels = previous_labels or {}
     source = cv2.VideoCapture(str(source_video))
     rendered = cv2.VideoCapture(str(output_video))
@@ -50,6 +52,12 @@ def rewrite_identity_overlay(
         scale = size[1] / 720.0
         label_font_scale = 0.45 * scale
         label_thickness = max(1, round(2 * scale))
+        court_map = CourtMiniMap(*size)
+        team_ids_by_color = (
+            {tuple(map(int, color)): team_id for team_id, color in enumerate(team_colors)}
+            if team_colors is not None
+            else {}
+        )
         writer = FfmpegVideoWriter(output_tmp, fps, size)
         if source.isOpened() and rendered.isOpened() and writer.is_opened():
             for record in records:
@@ -91,6 +99,29 @@ def rewrite_identity_overlay(
                     bottom = min(size[1], text_y + text_height + baseline + padding)
                     rendered_frame[top:bottom, left:right] = source_frame[top:bottom, left:right]
                     draw_box(rendered_frame, player["box"], text, draw_color, style="player")
+
+                map_entries = []
+                for player in record.get("players", ()):
+                    court_xy = player.get("court_xy")
+                    if court_xy is None:
+                        continue
+                    entry = {
+                        "court_xy": court_xy,
+                        "holder": player.get("holder", False),
+                        "jersey_number": player.get("jersey_number"),
+                    }
+                    local_id = player.get("local_track_id")
+                    marker_color = frame_colors.get(int(local_id)) if local_id is not None else None
+                    team_id = (
+                        team_ids_by_color.get(tuple(map(int, marker_color)))
+                        if marker_color is not None
+                        else player.get("team")
+                    )
+                    if team_id is not None and team_colors is not None:
+                        entry["team_semantic"] = normalize_team(team_id)
+                        entry["color"] = tuple(map(int, team_colors[int(team_id)]))
+                    map_entries.append(entry)
+                court_map.draw(rendered_frame, map_entries)
                 writer.write(rendered_frame)
                 written += 1
             frames_complete = written == len(records)

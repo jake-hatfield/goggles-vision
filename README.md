@@ -34,7 +34,7 @@ OpenHoopVision analyzes a basketball video one frame at a time. It detects playe
 
 - Detect players, the ball, the rim, scorers, holders, referees, and `ball-in-basket`.
 - Associate player detections with pose keypoints and local tracks.
-- Estimate team colors and reconcile player identities across frames with sports ReID and jersey-number OCR.
+- Estimate team colors and reconcile player identities across frames with OSNet ReID and jersey-number OCR.
 - Map detected court keypoints to a court layout and draw a mini-map.
 - Infer shots, dribbles, passes, rebounds, turnovers, and steals when the video provides enough evidence.
 - Render player labels, event status, a scoreboard, and court overlays into an H.264 video.
@@ -99,7 +99,7 @@ The default checkpoint paths are relative to the project directory:
 | Basketball detector | `weights/rf-detr-basketball.pth` |
 | Player pose | `weights/yolov8n-pose.pt` |
 | Court pose | `weights/yolo26s-pose-court-33kp.pt` |
-| Player ReID | [`weights/sports_model.pth.tar-60`](https://github.com/sjc042/gta-link/tree/main/reid_checkpoints) |
+| Player ReID | [`weights/osnet_x1_0_msmt17.pt`](https://github.com/KaiyangZhou/deep-person-reid) — Torchreid MSMT17 OSNet x1.0 |
 | Jersey-number OCR | `weights/basketball_jersey_number.ckpt` |
 
 ### Analyze a Video
@@ -148,7 +148,7 @@ Coming soon...
 
 [Ultralytics](https://github.com/ultralytics/ultralytics) — YOLO runtime for the [YOLOv8 pose](https://docs.ultralytics.com/models/yolov8/) player checkpoint and [YOLO26](https://docs.ultralytics.com/models/yolo26/) court-pose checkpoint.
 
-[McByte++](https://github.com/tstanczyk95/McBytePlusPlus) — acknowledged as a source for the local tracking implementation and the sports ReID checkpoint.
+[McByte++](https://github.com/tstanczyk95/McBytePlusPlus) — acknowledged as a source for the local tracking implementation.
 
 [ByteTrack](https://github.com/FoundationVision/ByteTrack) — high/low-confidence association and Kalman-filter foundations used by the local tracker.
 

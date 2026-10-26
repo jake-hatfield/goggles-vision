@@ -1,4 +1,4 @@
-"""Local OSNet x1.0 implementation for the bundled sports ReID checkpoint.
+"""Local OSNet x1.0 implementation for the Torchreid MSMT17 checkpoint.
 
 The architecture is adapted from Kaiyang Zhou's torchreid OSNet implementation.
 Copyright (c) 2018 Kaiyang Zhou. Licensed under the MIT License.
@@ -174,8 +174,8 @@ def _build_osnet_x1_0(num_classes=1):
     return _OSNetX1_0(num_classes=num_classes)
 
 
-class SportsReIDEncoder:
-    """Batched OSNet features from the McByte++ sports ReID checkpoint."""
+class OSNetReIDEncoder:
+    """Batched OSNet features from the Torchreid MSMT17 checkpoint."""
 
     def __init__(self, device, weights):
         self.device = torch.device(device)
@@ -200,7 +200,7 @@ class SportsReIDEncoder:
             return False
         try:
             if not self.weights.is_file():
-                raise FileNotFoundError(f"sports ReID checkpoint not found: {self.weights}")
+                raise FileNotFoundError(f"OSNet ReID checkpoint not found: {self.weights}")
             self.model = _build_osnet_x1_0(num_classes=1)
             checkpoint = torch.load(
                 self.weights,
@@ -208,20 +208,32 @@ class SportsReIDEncoder:
                 weights_only=False,
             )
             if not isinstance(checkpoint, dict):
-                raise RuntimeError("sports ReID checkpoint must contain a state dictionary")
+                raise RuntimeError("OSNet ReID checkpoint must contain a state dictionary")
             state = checkpoint.get("state_dict", checkpoint)
             if not isinstance(state, dict):
-                raise RuntimeError("sports ReID checkpoint state_dict must be a mapping")
+                raise RuntimeError("OSNet ReID checkpoint state_dict must be a mapping")
             model_state = self.model.state_dict()
             compatible = {}
             for key, value in state.items():
                 if not isinstance(key, str) or not isinstance(value, torch.Tensor):
                     continue
                 model_key = key.removeprefix("module.")
+                if ".conv2a." in model_key and ".conv2a.0." not in model_key:
+                    model_key = model_key.replace(".conv2a.", ".conv2a.0.", 1)
                 if model_key in model_state and model_state[model_key].shape == value.shape:
                     compatible[model_key] = value
             if not compatible:
-                raise RuntimeError("sports ReID checkpoint has no compatible OSNet weights")
+                raise RuntimeError("OSNet ReID checkpoint has no compatible weights")
+            missing = [
+                key
+                for key in model_state
+                if not key.startswith("classifier.") and key not in compatible
+            ]
+            if missing:
+                raise RuntimeError(
+                    f"OSNet ReID checkpoint is missing {len(missing)} feature weights; "
+                    f"first missing key: {missing[0]}"
+                )
             model_state.update(compatible)
             self.model.load_state_dict(model_state)
             self.model.eval().to(self.device)

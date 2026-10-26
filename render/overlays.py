@@ -24,9 +24,30 @@ def _rounded_rect(image, top_left, bottom_right, fill, radius):
     cv2.circle(image, (x2 - radius, y2 - radius), radius, fill, -1, cv2.LINE_AA)
 
 
-def _scoreboard_text(frame, text, center_x, center_y, scale, color, thickness):
+def _scoreboard_text(
+    frame, text, center_x, center_y, scale, color, thickness, background=None, background_width=None
+):
     font = cv2.FONT_HERSHEY_DUPLEX
     (text_width, text_height), baseline = cv2.getTextSize(text, font, scale, thickness)
+    if background is not None:
+        horizontal_padding = max(2, round(thickness * 1.5))
+        vertical_padding = max(4, round(thickness * 2))
+        box_width = text_width if background_width is None else background_width
+        _rounded_rect(
+            frame,
+            (
+                round(center_x - box_width / 2) - horizontal_padding,
+                round(center_y - text_height / 2) - vertical_padding,
+            ),
+            (
+                round(center_x + box_width / 2) + horizontal_padding,
+                round(center_y + text_height / 2) + vertical_padding,
+            ),
+            background,
+            vertical_padding,
+        )
+        brightness = 0.114 * background[0] + 0.587 * background[1] + 0.299 * background[2]
+        color = (248, 250, 252) if brightness < 145 else (29, 36, 47)
     glyph_padding = max(2, thickness * 2)
     glyph = np.zeros((text_height + baseline + glyph_padding, text_width + glyph_padding), dtype=np.uint8)
     glyph_origin = glyph_padding // 2
@@ -49,23 +70,6 @@ def _scoreboard_text(frame, text, center_x, center_y, scale, color, thickness):
     cv2.putText(frame, text, origin, font, scale, color, thickness, cv2.LINE_AA)
 
 
-def _scoreboard_marker(frame, x, marker_y, marker_width, marker_border, team_color):
-    _rounded_rect(
-        frame,
-        (round(x), marker_y[0] - marker_border),
-        (round(x + marker_width), marker_y[1] + marker_border),
-        (225, 230, 238),
-        marker_border * 2,
-    )
-    _rounded_rect(
-        frame,
-        (round(x + marker_border), marker_y[0]),
-        (round(x + marker_width - marker_border), marker_y[1]),
-        team_color,
-        marker_border,
-    )
-
-
 def _paint_scoreboard(frame, layout):
     panel = frame.copy()
     _rounded_rect(
@@ -79,10 +83,6 @@ def _paint_scoreboard(frame, layout):
     cv2.addWeighted(panel, alpha, frame, 1 - alpha, 0, frame)
 
     cursor = layout["bounds"][0] + round(layout["padding"])
-    _scoreboard_marker(
-        frame, cursor, layout["marker_y"], layout["marker_width"], layout["marker_border"], layout["colors"][0]
-    )
-    cursor += layout["marker_width"] + layout["gap"]
     _scoreboard_text(
         frame,
         layout["labels"][0],
@@ -92,7 +92,7 @@ def _paint_scoreboard(frame, layout):
         (171, 181, 194),
         layout["label_thickness"],
     )
-    cursor += layout["label_width"] + layout["gap"]
+    cursor += layout["label_width"] + layout["label_gap"]
 
     for index, score in enumerate((layout["dark_score"], layout["light_score"])):
         _scoreboard_text(
@@ -103,8 +103,10 @@ def _paint_scoreboard(frame, layout):
             layout["score_scale"],
             (248, 250, 252),
             layout["score_thickness"],
+            background=layout["colors"][index],
+            background_width=layout["score_width"],
         )
-        cursor += layout["score_width"] + layout["gap"]
+        cursor += layout["score_width"] + (layout["gap"] if index == 0 else layout["label_gap"])
         if index == 0:
             _scoreboard_text(
                 frame,
@@ -126,40 +128,15 @@ def _paint_scoreboard(frame, layout):
         (171, 181, 194),
         layout["label_thickness"],
     )
-    cursor += layout["label_width"] + layout["gap"]
-    _scoreboard_marker(
-        frame, cursor, layout["marker_y"], layout["marker_width"], layout["marker_border"], layout["colors"][1]
-    )
-    cursor += layout["marker_width"] + layout["gap"]
-    cv2.line(
-        frame,
-        (round(cursor), round(layout["center_y"] - layout["line_height"] / 2)),
-        (round(cursor), round(layout["center_y"] + layout["line_height"] / 2)),
-        (86, 97, 111),
-        layout["score_thickness"],
-        cv2.LINE_AA,
-    )
-    cursor += layout["score_thickness"] + layout["gap"]
-    _scoreboard_text(
-        frame,
-        layout["time_text"],
-        cursor + layout["time_width"] / 2,
-        layout["center_y"],
-        layout["time_scale"],
-        (190, 198, 210),
-        layout["time_thickness"],
-    )
 
 
 def draw_scoreboard(
     frame: np.ndarray,
     scores: Mapping[str, int],
-    video_time: float | None = None,
     team_colors: Sequence[Sequence[int | None]] | None = None,
     right_clearance: float | None = None,
 ) -> None:
     """Draw a compact, content-sized scoreboard above the court."""
-    video_time = 0.0 if video_time is None else video_time
     height, width = frame.shape[:2]
     scale = drawing_scale(frame)
     available_width = width - 2 * max(
@@ -177,40 +154,19 @@ def draw_scoreboard(
     ):
         return
 
-    fallback_colors = (
-        (0, 0, 0),
-        (255, 255, 255),
-    )
     colors = tuple(
-        tuple(
-            map(
-                int,
-                (
-                    team_colors[index]
-                    if team_colors is not None and len(team_colors) > index and team_colors[index] is not None
-                    else fallback
-                ),
-            )
-        )
-        for index, fallback in enumerate(fallback_colors)
+        tuple(map(int, team_colors[index]))
+        if team_colors is not None and len(team_colors) > index and team_colors[index] is not None
+        else None
+        for index in range(2)
     )
-
-    total_seconds = max(0, int(round(float(video_time))))
-    if total_seconds >= 3600:
-        time_text = f"{total_seconds // 3600}:{(total_seconds % 3600) // 60:02d}:{total_seconds % 60:02d}"
-    else:
-        time_text = f"{total_seconds // 60}:{total_seconds % 60:02d}"
 
     max_score = 999
     dark_score = str(max(0, min(max_score, int(scores.get("dark", 0)))))
     light_score = str(max(0, min(max_score, int(scores.get("light", 0)))))
     unit = min(scale, available_width / 442.0)
     font = cv2.FONT_HERSHEY_DUPLEX
-    label_scale, score_scale, time_scale = (
-        0.42 * unit,
-        unit,
-        0.55 * unit,
-    )
+    label_scale, score_scale = 0.42 * unit, unit
     label_thickness = score_thickness = max(1, round(unit))
 
     def text_size(text, scale, thickness):
@@ -219,12 +175,10 @@ def draw_scoreboard(
     labels = ['DARK', 'LIGHT']
     label_sizes = [text_size(label, label_scale, label_thickness) for label in labels]
     score_size = text_size(str(max_score), score_scale, score_thickness)
-    time_thickness = max(1, round(unit))
-    time_width, time_height = text_size(time_text, time_scale, time_thickness)
     separator_width = text_size('-', score_scale, score_thickness)[0]
     label_width = max(size[0] for size in label_sizes)
     score_width = score_size[0]
-    line_height = max(max(size[1] for size in label_sizes), score_size[1], time_height)
+    line_height = max(max(size[1] for size in label_sizes), score_size[1])
     padding = max(
         1,
         round(line_height * 0.5),
@@ -233,20 +187,13 @@ def draw_scoreboard(
         1,
         round(padding * 0.5),
     )
-    marker_border = max(1, round(unit))
-    marker_width = max(
-        round(5 * unit),
-        round(line_height / 6.0) + 2 * marker_border,
-    )
-    team_width = marker_width + gap + label_width
+    label_gap = gap + round(4 * unit)
     board_width = round(
         2 * padding
-        + 2 * team_width
+        + 2 * label_width
         + 2 * score_width
         + separator_width
-        + time_width
-        + 6 * gap
-        + score_thickness
+        + 2 * (gap + label_gap)
     )
 
     board_height = line_height + 2 * padding
@@ -259,22 +206,14 @@ def draw_scoreboard(
     x1 = (width - board_width) // 2
     x2, y2 = x1 + board_width, y1 + board_height
     center_y = y1 + board_height / 2
-    marker_y = (
-        round(center_y - line_height / 3.0),
-        round(center_y + line_height / 3.0),
-    )
-
     _paint_scoreboard(
         frame,
         {
             "bounds": (x1, y1, x2, y2),
             "center_y": center_y,
-            "line_height": line_height,
             "padding": padding,
             "gap": gap,
-            "marker_y": marker_y,
-            "marker_width": marker_width,
-            "marker_border": marker_border,
+            "label_gap": label_gap,
             "colors": colors,
             "labels": labels,
             "label_width": label_width,
@@ -286,10 +225,6 @@ def draw_scoreboard(
             "score_scale": score_scale,
             "score_thickness": score_thickness,
             "separator_width": separator_width,
-            "time_text": time_text,
-            "time_width": time_width,
-            "time_scale": time_scale,
-            "time_thickness": time_thickness,
         },
     )
 
@@ -367,7 +302,6 @@ def draw_fps_and_event_status(
 def draw_video_overlays(
     frame: np.ndarray,
     scores: Mapping[str, int],
-    video_time: float,
     team_colors: Sequence[Sequence[int | None]] | None,
     right_clearance: float | None,
     fps_label: str,
@@ -377,7 +311,6 @@ def draw_video_overlays(
     draw_scoreboard(
         frame,
         scores,
-        video_time=video_time,
         team_colors=team_colors,
         right_clearance=right_clearance,
     )

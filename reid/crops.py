@@ -219,6 +219,15 @@ def jersey_torso_crop(
         or np.any(scores[list(joints)] < float(parameters.get("pose_confidence", 0.2)))
     ):
         return box_crop()
+    pose_data = validated_pose(
+        points,
+        scores,
+        box,
+        frame_shape=frame.shape,
+        jersey_pose=True,
+    )
+    if pose_data is None or not np.all(pose_data[2][list(joints)]):
+        return box_crop()
     torso = points[list(joints), :2]
     shoulder, hips = points[[5, 6], :2], points[[11, 12], :2]
     torso_height = max(1.0, float(hips[:, 1].max() - shoulder[:, 1].min()))

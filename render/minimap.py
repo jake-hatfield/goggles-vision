@@ -77,8 +77,7 @@ class CourtMiniMap:
         outline = _WHITE if light_marker else _MARKER_OUTLINE_COLOR
         inner_radius = max(scale, radius - round(1.25 * self.frame_scale) * scale)
         if holder:
-            thickness = self.marker_thickness * scale
-            cv2.circle(panel, center, radius + (line + thickness) // 2, [0, 190, 255], thickness, cv2.LINE_AA)
+            cv2.circle(panel, center, radius + line + scale, [0, 220, 255], line, cv2.LINE_AA)
         cv2.circle(panel, center, radius, outline, -1, cv2.LINE_AA)
         cv2.circle(panel, center, inner_radius, marker, -1, cv2.LINE_AA)
         if not light_marker:

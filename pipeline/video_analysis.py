@@ -219,7 +219,7 @@ def _print_video_summary(run: VideoAnalysisContext) -> None:
         else "loaded" if run.identity_resolver.encoder.model is not None else "not needed"
     )
     print(
-        "OSNet sports ReID: "
+        "OSNet MSMT17 ReID: "
         f"{encoder_status}; crops={run.identity_resolver.total_crops}, "
         f"matches={run.identity_resolver.match_count}, "
         f"history relinks={run.identity_resolver.identity_relink_count}, "
@@ -440,7 +440,6 @@ class VideoAnalysisRunner:
             partial(
                 draw_scoreboard,
                 scores=state.scores,
-                video_time=result.frame_time,
                 team_colors=(
                     state.team_classifier.team_colors
                     if state.team_classifier.team_colors_locked
@@ -467,7 +466,6 @@ class VideoAnalysisRunner:
             partial(
                 draw_video_overlays,
                 scores=state.scores,
-                video_time=output.last_frame_time,
                 team_colors=(
                     state.team_classifier.team_colors
                     if state.team_classifier.team_colors_locked

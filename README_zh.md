@@ -99,7 +99,7 @@ python -m pip install -e . --no-deps
 | 篮球检测器 | `weights/rf-detr-basketball.pth` |
 | 球员姿态模型 | `weights/yolov8n-pose.pt` |
 | 场地姿态模型 | `weights/yolo26s-pose-court-33kp.pt` |
-| 球员 ReID | [`weights/sports_model.pth.tar-60`](https://github.com/sjc042/gta-link/tree/main/reid_checkpoints) |
+| 球员 ReID | [`weights/osnet_x1_0_msmt17.pt`](https://github.com/KaiyangZhou/deep-person-reid) — Torchreid MSMT17 OSNet x1.0 |
 | 球衣号码 OCR | `weights/basketball_jersey_number.ckpt` |
 
 ### 分析视频
@@ -146,7 +146,7 @@ python main.py --video {your_video}.mp4
 
 [Ultralytics](https://github.com/ultralytics/ultralytics) — YOLO 运行时，用于加载球员 [YOLOv8 姿态模型](https://docs.ultralytics.com/models/yolov8/) 和场地 [YOLO26 姿态模型](https://docs.ultralytics.com/models/yolo26/) 权重。
 
-[McByte++](https://github.com/tstanczyk95/McBytePlusPlus) — 本地跟踪实现和体育 ReID 权重参考的来源。
+[McByte++](https://github.com/tstanczyk95/McBytePlusPlus) — 本地跟踪实现的参考来源。
 
 [ByteTrack](https://github.com/FoundationVision/ByteTrack) — 本地跟踪器所采用的高低置信度关联方法和卡尔曼滤波基础。
 

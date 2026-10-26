@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 import cv2
 import numpy as np
 
-from models.appearance import SportsReIDEncoder
+from models.appearance import OSNetReIDEncoder
 from tracking.ball import normalize_fps
 from reid.crops import build_player_crop, jersey_crop_overlaps_referee
 from reid.jersey import get_trusted_jersey_key, update_jersey_votes
@@ -68,7 +68,7 @@ class IdentityResolver:
         self.parameters["weights"] = str(weights)
         self.fps = normalize_fps(fps)
         self.team_classifier = team_classifier
-        self.encoder = SportsReIDEncoder(device, self.parameters["weights"])
+        self.encoder = OSNetReIDEncoder(device, self.parameters["weights"])
         self.local_to_global = {}
         self.local_id_to_global = {}
         self.local_identity_segments = defaultdict(list)

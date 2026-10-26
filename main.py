@@ -13,7 +13,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--video", type=Path)
     parser.add_argument("--model", type=Path, default=WEIGHTS_DIR / "rf-detr-basketball.pth")
     parser.add_argument("--pose-model", type=Path, default=WEIGHTS_DIR / "yolov8n-pose.pt")
-    parser.add_argument("--reid-model", type=Path, default=WEIGHTS_DIR / "sports_model.pth.tar-60")
+    parser.add_argument("--reid-model", type=Path, default=WEIGHTS_DIR / "osnet_x1_0_msmt17.pt")
     parser.add_argument("--jersey-ocr-model", type=Path, default=WEIGHTS_DIR / "basketball_jersey_number.ckpt")
     parser.add_argument("--court-model", type=Path, default=WEIGHTS_DIR / "yolo26s-pose-court-33kp.pt")
     parser.add_argument("--output", type=Path, default=WORKSPACE_ROOT / 'output.mp4')

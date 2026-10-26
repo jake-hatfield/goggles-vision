@@ -202,7 +202,7 @@ class FrameEventProcessor:
                     "schema": "global_player_identity_v1",
                     "local_id_field": "local_track_id",
                     "global_id_field": "id",
-                    "reid_model": "OSNet x1.0 sports_model.pth.tar-60",
+                    "reid_model": "OSNet x1.0 MSMT17 (osnet_x1_0_msmt17.pt)",
                     "matching_score": "multi-frame OSNet cosine similarity with team and locked jersey evidence",
                     "reid_crop": "pose-derived foreground mask with full-box fallback",
                     "reid_eligibility": (
