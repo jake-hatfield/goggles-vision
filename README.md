@@ -10,6 +10,10 @@
 
 ## Latest Updates
 
+**2026-11-02**
+- **[AI Highlights](https://github.com/feifeifei85/OpenHoopVision-AI-Highlights):** An iOS companion to OpenHoopVision that analyzes videos on-device to flag likely made shots, then lets users review and export highlight clips.
+- **[OpenHoopVision Shooting](https://github.com/feifeifei85/OpenHoopVision-shooting):** A shooting-analysis companion that builds on the core pipeline to estimate shot mechanics and output review videos with timing and pose metrics.
+
 **2026-10-26**
 - **Upgraded player pose inference:** Replaced full-frame YOLOv8n-Pose with standalone PyTorch RTMPose-S, batching pose estimation on the existing detector's person boxes to avoid redundant full-frame person detection.
 - **More reliable court mapping:** Replaced YOLO26s with a project-trained MobileNetV4-Conv-Small court-keypoint model with visibility scores (896×512; PCK@10 88.17%, PCK@20 94.26%). Short-term keypoint history and camera-motion compensation help maintain mini-map continuity when detections are sparse.
@@ -71,7 +75,7 @@ The shot detector uses ball motion and rim evidence to distinguish shots from dr
 | End-to-end shot pipeline (`basketball-event-recognition`) | Precision: 85.51%; recall: 83.10%; F1: 84.29%; team attribution accuracy: 84.75% (50/59). |
 | Shot made (with `ball-in-basket`) | Precision: 89.13%; recall: 82.00%; F1: 85.42%. |
 
-All datasets were curated and annotated in-house. Model scores use validation splits. The current end-to-end regression covers 71 shots across 7 videos, including 50 makes, with strict one-to-one matching at temporal IoU ≥ 0.5 and a `ball-in-basket` threshold of 0.55. Team attribution accuracy uses the 59 matched shots as its denominator.
+All datasets were curated and annotated in-house. Model scores use validation splits. The current end-to-end regression covers 71 shots across 7 videos, including 50 makes, with strict one-to-one matching at temporal IoU 0.5 and a `ball-in-basket` threshold of 0.55. Team attribution accuracy uses the 59 matched shots as its denominator.
 
 ## Run OpenHoopVision
 
@@ -143,7 +147,7 @@ The system currently infers shots, dribbles, passes, rebounds, turnovers, and st
 
 Known limitations: Occlusion, camera cuts, and low-resolution footage can make ball tracking, player identity, and event results unreliable. Low camera angles that obscure court boundaries can prevent the mini-map from working. The pipeline runs offline on recorded video, can be slow without a capable GPU, and requires model checkpoints to be installed separately.
 
-Next, I'm exploring free tools built on this project, such as automatic video highlights. 
+Next, I'm exploring free tools built on this project, such as automatic video highlights.
 
 Coming soon...
 
