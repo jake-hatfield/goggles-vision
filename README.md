@@ -121,12 +121,19 @@ python main.py --video {your_video}.mp4
 
 `python main.py --help` lists all detection thresholds, tracking settings, model paths, and output options.
 
+When the camera background matches a saved profile in `configs/courts/`, the runner uses its court boundary automatically. Unmatched cameras use the normal court model and fallback. To override the detected boundary, pass `--court-boundary path/to/boundary.json`. The file is a JSON array of three or more `[x, y]` vertices around a convex polygon, ordered along its perimeter. Coordinates are fractions of frame width and height, starting at the top left. Player ground points on or inside the polygon can qualify for identity and possession tracking. Use the same framing when reusing a boundary. Court mapping for metric positions and the mini-map still uses the court keypoint model.
+
+Automatic identity stitching runs after inference. It uses repeated jersey reads, fresh team colors, and local track continuity to reconnect supported tracklets and fill short ID gaps. When a local track switches between teammates, sustained changes in shorts and shoes can reconnect it to a player previously identified by jersey reads. Ambiguous appearances can still leave switches unresolved. For a manually reviewed override, use `--identity-review path/to/review.json` with the exact clip and frame numbering used for the review. The file contains `frame_count` and `edits`. Each edit sets `id`, `team`, and `jersey_number` for one or more inclusive `[local_track_id, first_frame, last_frame]` segments. `null` clears a field. The override edits existing on-court observations and rejects duplicate global IDs in a frame. Both passes update finalized labels and frame-specific ID references after event inference. See [the sample review](configs/identity-reviews/baseline-sample.json).
+
 ### Output Files
 
 - `--output` writes an annotated H.264 MP4. The default is `../output.mp4` when run from the project directory. Use `--output none` to skip all video rendering and writing while keeping analysis and JSONL output.
 - `--tracks` writes one JSON object per frame. The default is `../tracks.jsonl`.
+- `--events` writes a chronological `v2` JSON list of completed shots, dribbles, passes, rebounds, and turnovers. The default is `../events.json`. Steals are turnovers with `attrs.cause` set to `steal`.
 
 Each JSONL frame record uses the `basketball_frame_v2` schema and includes the frame number, timestamp, players, holder, ball and rim features, raw detections, and events. The first record also contains the run configuration. Event records use frame intervals and include event-specific fields such as shot result and points, pass receiver, or rebound type.
+
+The compact event list includes frame/time intervals and available player and team information. Event-specific details are in `attrs`, including `bounce_count` for dribbles, `receiver_id` for passes, `rebound_type` and `shot_id` for rebounds, and `gained_by`, `gained_team`, and `cause` for turnovers. A rebound's `attrs.shot_id` refers to the preceding shot's `attrs.shot_id`.
 
 ## Project Structure
 

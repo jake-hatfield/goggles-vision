@@ -72,7 +72,8 @@ def rewrite_identity_overlay(
                     x1 = min(max(x1, 0), size[0] - 1)
                     y1 = min(max(y1, 0), size[1] - 1)
                     team_id = player.get("team")
-                    draw_color = frame_colors.get(player.get("local_track_id"))
+                    identity_changed = player.get("identity_reviewed") or player.get("identity_stitched")
+                    draw_color = None if identity_changed else frame_colors.get(player.get("local_track_id"))
                     if draw_color is None:
                         draw_color = (
                             tuple(map(int, team_colors[int(team_id)]))

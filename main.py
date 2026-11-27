@@ -16,9 +16,20 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--reid-model", type=Path, default=WEIGHTS_DIR / "osnet_x1_0_msmt17.pt")
     parser.add_argument("--jersey-ocr-model", type=Path, default=WEIGHTS_DIR / "basketball_jersey_number.ckpt")
     parser.add_argument("--court-model", type=Path, default=WEIGHTS_DIR / "court_mobilenetv4_896x512.pt")
+    parser.add_argument(
+        "--court-boundary", type=Path,
+        help="Use a JSON polygon of normalized image points to identify on-court players.",
+    )
+    parser.add_argument(
+        "--identity-review", type=Path,
+        help="Apply reviewed local track intervals to the final IDs and labels for this exact clip.",
+    )
     parser.add_argument("--output", type=Path, default=WORKSPACE_ROOT / 'output.mp4')
     parser.add_argument("--tracks", type=Path, default=WORKSPACE_ROOT / 'tracks.jsonl')
-    parser.add_argument("--events", type=Path, default=WORKSPACE_ROOT / 'events.json')
+    parser.add_argument(
+        "--events", type=Path, default=WORKSPACE_ROOT / "events.json",
+        help="Write all completed events to this JSON file (default: %(default)s).",
+    )
     parser.add_argument("--player-threshold", type=float, default=0.4)
     parser.add_argument("--ball-threshold", type=float, default=0.5)
     parser.add_argument("--rim-threshold", type=float, default=0.3)

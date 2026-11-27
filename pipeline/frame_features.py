@@ -138,6 +138,9 @@ class FrameFeatureBuilder:
             jersey_samples=jersey_samples,
             reid_eligible_ids=ctx.reid_track_ids,
         )
+        self.state.jersey_sampler.resolve_conflicts(
+            self.state.identity_resolver.jersey_conflict_recoveries, self.state.frame_index
+        )
         for player_feature, box_color in staged_features:
             local_id = int(player_feature["id"])
             player_feature["local_track_id"] = local_id

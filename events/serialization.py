@@ -12,6 +12,9 @@ from tracking.team import normalize_team
 
 TrackObservation = tuple[int, Any, str | None, str | None]
 TrackObservations = dict[str, list[TrackObservation]]
+_EVENT_FIELDS = (
+    "start", "end", "start_frame", "end_frame", "completed_frame", "player_id", "local_track_id",
+)
 
 
 def _event_location(event: dict[str, Any], frame_record: dict[str, Any]) -> list[float] | None:
@@ -152,7 +155,7 @@ def _event_list_item(
     )
     item = {
         "id": str(event_id),
-        "type": "shot",
+        "type": event["event"],
     }
     jersey_number = track_jersey_number
     if jersey_number is not None:
@@ -163,7 +166,7 @@ def _event_list_item(
     if team is not None:
         item["team"] = team
 
-    for field in ("start", "end", "start_frame", "end_frame"):
+    for field in _EVENT_FIELDS:
         value = event.get(field)
         if value is not None:
             item[field] = value
@@ -172,25 +175,34 @@ def _event_list_item(
         item["location"] = location
 
     result = event.get("result")
-    if result == "miss":
+    if item["type"] == "shot" and result == "miss":
         result = "missed"
     if result is not None:
         item["result"] = result
 
-    attrs = {}
-    if event.get("result") == "made" and event.get("points") is not None:
-        attrs["points"] = event["points"]
-    elif event.get("shot_value") is not None:
-        attrs["shot_value"] = event["shot_value"]
-    if event.get("result") == "made" and event.get("assister") is not None:
-        attrs["assister"] = event["assister"]
+    if item["type"] == "shot":
+        attrs = {}
+        if event.get("shot_id") is not None:
+            attrs["shot_id"] = event["shot_id"]
+        if event.get("result") == "made" and event.get("points") is not None:
+            attrs["points"] = event["points"]
+        elif event.get("shot_value") is not None:
+            attrs["shot_value"] = event["shot_value"]
+        if event.get("result") == "made" and event.get("assister") is not None:
+            attrs["assister"] = event["assister"]
+    else:
+        common_fields = {"event", "team", "location", "result", *_EVENT_FIELDS}
+        attrs = {
+            key: value for key, value in event.items()
+            if key not in common_fields and value is not None
+        }
     if attrs:
         item["attrs"] = attrs
     return item
 
 
 def write_event_list(tracks_path: Path, event_list_path: Path) -> int:
-    """Write finalized shot events as a compact v2 event list."""
+    """Write finalized events as a compact v2 event list."""
     track_observations: TrackObservations = defaultdict(list)
     events = []
     with open(tracks_path, encoding="utf-8") as track_file:
@@ -212,7 +224,7 @@ def write_event_list(tracks_path: Path, event_list_path: Path) -> int:
             events.extend(
                 (event, record)
                 for event in record.get("events") or ()
-                if event.get("event") == "shot"
+                if event.get("event")
             )
 
     events.sort(

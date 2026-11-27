@@ -10,11 +10,15 @@ import numpy as np
 
 from models.appearance import OSNetReIDEncoder
 from tracking.ball import normalize_fps
+from reid.consensus import LOCAL_TRACK_SEGMENT_MAX_GAP
 from reid.crops import build_player_crop
 from reid.jersey import (
+    JerseyConflict,
     get_trusted_jersey_key,
     is_jersey_conflict_prediction,
     jersey_conflict_timeout,
+    lock_jersey_number,
+    register_locked_jersey,
     update_jersey_votes,
 )
 from reid.matching import match_new_tracks
@@ -52,7 +56,6 @@ class LocalIdentityTrack:
     match_similarity_cache: dict = field(default_factory=dict)
     jersey_votes: deque = field(default_factory=deque)
     jersey_conflict_votes: deque = field(default_factory=deque)
-    jersey_conflict_confirmed: bool = False
     jersey_identity_number_added: str | None = None
     jersey_team_history: deque = field(default_factory=deque)
     jersey_confirmed_key: tuple[int, str] | None = None
@@ -60,6 +63,7 @@ class LocalIdentityTrack:
     jersey_candidate: str | None = None
     jersey_locked: bool = False
     identity_split_pending: bool = False
+    last_visible_frame: int | None = None
 
     @property
     def feature_count(self):
@@ -106,6 +110,7 @@ class IdentityResolver:
         self.clip_cut_frame_index = None
         self.jersey_referee_rejects = 0
         self.visible_local_ids = set()
+        self.jersey_conflict_recoveries: dict[int, int] = {}
 
     def _reset_clip_identities(self):
         for identity in self.identities.values():
@@ -174,8 +179,6 @@ class IdentityResolver:
         local_state = self.local_tracks.get(int(local_id))
         if local_state is None or not local_state.jersey_locked:
             return False
-        if local_state.jersey_conflict_confirmed:
-            return True
         conflict_votes = local_state.jersey_conflict_votes
         if not conflict_votes:
             return False
@@ -415,7 +418,6 @@ class IdentityResolver:
                 local_state.jersey_lock_span = 0
                 local_state.jersey_votes.clear()
                 local_state.jersey_conflict_votes.clear()
-                local_state.jersey_conflict_confirmed = False
             local_state.reid_resolved = False
             local_state.identity_feature_count = 0
             local_state.match_similarity_cache.clear()
@@ -441,6 +443,21 @@ class IdentityResolver:
         self.identity_segment_split_count += 1
         if not preserve_team:
             self.team_classifier.forget_track(local_id)
+
+    def _recover_jersey_conflict(self, local_id: int, frame_index: int, conflict: JerseyConflict) -> None:
+        """Detach the recycled local track and retain the evidence for the new player."""
+        local_state = self.local_tracks[local_id]
+        segments = self.local_identity_segments[local_id]
+        start = max(conflict.first_frame, segments[-1][0]) if segments else conflict.first_frame
+        team_observations = [observation for observation in local_state.jersey_team_history if observation[0] >= start]
+        self._split_local_identity(local_id, start, preserve_team=True)
+        local_state.jersey_team_history.extend(team_observations)
+        lock_jersey_number(
+            self, local_state, conflict.number, frame_index,
+            conflict.support, conflict.confidence, conflict.purity, conflict.span,
+        )
+        register_locked_jersey(self, local_id, conflict.number, frame_index, self.visible_local_ids)
+        self.jersey_conflict_recoveries[local_id] = start
 
 
     def get_confident_team(self, counts: dict[int, int] | None) -> int | None:
@@ -534,6 +551,7 @@ class IdentityResolver:
         start_time = time.perf_counter()
         active_ids = {int(track_id) for track_id in active_ids}
         frame_index = int(frame_index)
+        self.jersey_conflict_recoveries.clear()
         jersey_parameters = self.parameters.get("jersey_ocr", {})
         feature_gap = max(1, int(self.parameters.get("reid_min_frame_gap", 5)))
         maximum_features = max(2, int(self.parameters.get("feature_bank_size", 50)))
@@ -592,6 +610,17 @@ class IdentityResolver:
             if local_state.team_counts is None:
                 local_state.team_counts = {}
             current_team = team_classifier.predict_identity_track(local_id) if reid_eligible else None
+            last_visible = local_state.last_visible_frame
+            if reid_eligible:
+                local_state.last_visible_frame = frame_index
+            if reid_eligible and last_visible is not None and frame_index - last_visible > LOCAL_TRACK_SEGMENT_MAX_GAP:
+                global_id = self.local_to_global.get(local_id)
+                previous_team = self.get_identity_team(global_id)
+                if previous_team is not None and team_classifier.contradicts_team_at(local_id, frame_index, previous_team):
+                    self._split_local_identity(local_id, frame_index)
+                    self.team_switch_split_count += 1
+                    reid_conflict_ids.discard(local_id)
+                    current_team = None
             team_history = local_state.team_counts or {}
             if current_team is not None and team_history:
                 previous_team, previous_count = max(team_history.items(), key=lambda item: item[1])
@@ -654,7 +683,10 @@ class IdentityResolver:
                     local_state.reid_last_frame = frame_index
                 self.total_crops += len(candidates)
 
-        update_jersey_votes(self, frame_index, jersey_samples, self.visible_local_ids)
+        confirmed_conflicts = update_jersey_votes(self, frame_index, jersey_samples, self.visible_local_ids)
+        for local_id, conflict in confirmed_conflicts.items():
+            self._recover_jersey_conflict(local_id, frame_index, conflict)
+            reid_conflict_ids.discard(local_id)
         for local_id in self.visible_local_ids & reid_eligible_ids:
             if local_id not in reid_conflict_ids:
                 self._sync_jersey_identity(local_id, frame_index)
@@ -708,6 +740,7 @@ class IdentityResolver:
                 ):
                     local_state.reid_resolved = True
                     newly_resolved_local_ids.add(local_id)
+            segment_start = frame_index
             if local_id not in self.local_to_global:
                 identity_start = (
                     local_state.created_frame
@@ -715,6 +748,7 @@ class IdentityResolver:
                     else frame_index
                 )
                 global_id = self._create_identity(local_id, identity_start)
+                segment_start = identity_start
                 local_state.identity_split_pending = False
                 self.identities[global_id].team_counts = dict(local_state.team_counts or {})
             identity = self.identities.get(self.local_to_global[local_id])
@@ -735,7 +769,7 @@ class IdentityResolver:
             if segments and segments[-1][0] == local_id and segments[-1][2] >= frame_index - 1:
                 segments[-1] = (local_id, segments[-1][1], frame_index)
             else:
-                segments.append((local_id, frame_index, frame_index))
+                segments.append((local_id, segment_start, frame_index))
             if reid_eligible and local_id not in reid_conflict_ids:
                 self._sync_jersey_identity(local_id, frame_index)
 
