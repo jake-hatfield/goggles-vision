@@ -1,5 +1,7 @@
 """Court geometry and player-position mapping for basketball tracking."""
 
+import json
+from pathlib import Path
 from typing import Any
 
 import cv2
@@ -631,6 +633,30 @@ def update_court_state(
     state.court_frame = int(frame_index)
 
 
+def load_court_boundary(path: Path) -> np.ndarray:
+    """Load a convex court outline in normalized image coordinates."""
+    try:
+        vertices = np.asarray(json.loads(path.read_text(encoding="utf-8")), dtype=np.float32)
+    except (OSError, TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(f"Cannot read court boundary {path}: {exc}") from exc
+    if (
+        vertices.ndim == 2
+        and vertices.shape[1] == 2
+        and len(vertices) >= 3
+        and np.isfinite(vertices).all()
+        and np.all((0 <= vertices) & (vertices <= 1))
+    ):
+        hull = cv2.convexHull(vertices, returnPoints=False).ravel()
+        # Hull membership and neighbor order reject repeats, collinear points, and crossings.
+        steps = np.diff(hull, append=hull[0]) % len(vertices)
+        if len(hull) == len(vertices) and (np.all(steps == 1) or np.all(steps == len(vertices) - 1)):
+            return vertices
+    raise ValueError(
+        f"Invalid court boundary {path}: expected a convex polygon of at least three "
+        "[x, y] points in perimeter order, with coordinates from 0 to 1"
+    )
+
+
 def is_player_on_court(
     track: Any,
     pose: tuple[np.ndarray, np.ndarray] | None,
@@ -638,6 +664,8 @@ def is_player_on_court(
     frame_index: int,
     frame_shape: tuple[int, ...],
     min_fallback_height: float = 100,
+    *,
+    boundary: np.ndarray | None = None,
 ) -> bool:
     """Return whether a local player track is eligible for on-court processing."""
     pose_data = None if pose is None else validated_pose(pose[0], pose[1], track.box)
@@ -645,6 +673,11 @@ def is_player_on_court(
     height = float(track.box[3] - track.box[1])
     if not ankle_visible and height < float(min_fallback_height):
         return False
+    if boundary is not None:
+        ground_x, ground_y = get_player_ground_point(track, pose)
+        frame_height, frame_width = frame_shape[:2]
+        point = (float(ground_x) / frame_width, float(ground_y) / frame_height)
+        return cv2.pointPolygonTest(boundary, point, False) >= 0
     if mapper.is_recent(frame_index):
         court_point = mapper.transform(
             get_player_ground_point(track, pose),
@@ -678,5 +711,6 @@ __all__ = [
     "court_paths",
     "default_nba_court_vertices",
     "is_player_on_court",
+    "load_court_boundary",
     "update_court_state",
 ]

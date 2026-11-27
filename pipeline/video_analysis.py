@@ -33,6 +33,7 @@ from reid.consensus import reconcile_jersey_number_records
 from reid.jersey import JerseyNumberSampler
 from reid.records import assign_identity_labels, reconcile_identity_records
 from reid.resolver import IdentityResolver
+from reid.review import apply_identity_review, load_identity_review, remap_reviewed_references
 from render.frame import FrameRenderer
 from render.identity import rewrite_identity_overlay
 from render.label import player_overlay_label
@@ -44,7 +45,8 @@ from render.overlays import (
 )
 from render.writer import FfmpegVideoWriter
 from tracking.ball import ShotBallTracker
-from tracking.court import CourtMapper, default_nba_court_vertices
+from tracking.camera_profiles import find_court_boundary
+from tracking.court import CourtMapper, default_nba_court_vertices, load_court_boundary
 from tracking.mcbyte import GuardedCMC, IoU
 from tracking.player import HolderState, make_tracker
 from tracking.team import JerseyTeamClassifier
@@ -111,6 +113,7 @@ def _save_records(
     records: list[dict[str, Any]],
     resolver: Any,
     identity_uncertain_refs: set[tuple[int, int]],
+    reviewed_remaps: dict[int, dict[int, int | None]] | None = None,
 ) -> None:
     tracks_tmp = tracks_path.with_name(tracks_path.name + ".tmp")
     try:
@@ -123,9 +126,16 @@ def _save_records(
                     raise ValueError("track records changed while resolving jersey numbers")
                 record = json.loads(line)
                 record["players"] = records[index].get("players", [])
+                reviewed_players = record["players"] if reviewed_remaps and record["frame"] in reviewed_remaps else None
+                if reviewed_players is not None:
+                    record["players"] = [player.copy() for player in reviewed_players]
                 if resolver.identity_aliases:
                     reconcile_identity_records([record], resolver)
                 _clear_uncertain_identity([record], identity_uncertain_refs)
+                if reviewed_players is not None:
+                    record["players"] = reviewed_players
+                if reviewed_remaps:
+                    remap_reviewed_references(record, reviewed_remaps, record["frame"])
                 destination.write(json.dumps(record, ensure_ascii=False) + "\n")
                 record_count += 1
             if record_count != len(records):
@@ -142,6 +152,8 @@ def finalize_identity_records(
     resolver: Any,
     rewrite_overlay: Callable[..., None] | None,
     label_for_player: Callable[[dict[str, Any]], str],
+    identity_review: dict | None = None,
+    source_video: Path | None = None,
 ) -> None:
     """Reconcile cached jersey evidence, persist JSONL changes, and redraw when needed."""
     has_identity_history_changes = bool(
@@ -206,17 +218,25 @@ def finalize_identity_records(
         records, predictions, digit_predictions, initial_states
     )
     uncertain_changes = _clear_uncertain_identity(records, identity_uncertain_refs)
+    if identity_review is None and source_video is not None:
+        from reid.stitch import stitch_identities
+
+        automatic_review = stitch_identities(records, source_video, sampler, resolver)
+        reviewed_remaps = apply_identity_review(records, automatic_review, automatic=True) if automatic_review else None
+    else:
+        reviewed_remaps = apply_identity_review(records, identity_review) if identity_review is not None else None
     changed = bool(
         result.added
         or result.corrected
         or result.status_changed
         or uncertain_changes
+        or reviewed_remaps
     )
     if not changed and not has_identity_history_changes:
         print(f"jersey track consensus: {result.labeled}/{result.total_players} labeled")
         return
 
-    _save_records(tracks_path, records, resolver, identity_uncertain_refs)
+    _save_records(tracks_path, records, resolver, identity_uncertain_refs, reviewed_remaps)
     if rewrite_overlay is not None and (changed or history_label_changed):
         previous_overlay_labels = {key: state[2] for key, state in initial_states.items()}
         rewrite_overlay(records, previous_overlay_labels)
@@ -368,6 +388,24 @@ class VideoAnalysisRunner:
             raise ValueError("--tracks must not refer to the output video")
         if any(path is not None and _same_path(events_path, path) for path in (video_path, tracks_path, output_path)):
             raise ValueError("--events must not refer to the input, tracks, or output file")
+        boundary_path = getattr(args, "court_boundary", None)
+        if boundary_path is None:
+            boundary_path = find_court_boundary(video_path, Path(__file__).resolve().parents[1] / "configs" / "courts")
+            if boundary_path is not None:
+                print(f"Matched court camera profile: {boundary_path.stem}")
+        self.identity_review = None
+        review_path = getattr(args, "identity_review", None)
+        if review_path is not None:
+            review_path = Path(review_path).expanduser().resolve()
+            if any(path is not None and _same_path(review_path, path) for path in (output_path, tracks_path, events_path)):
+                raise ValueError("--identity-review must not refer to an output file")
+            self.identity_review = load_identity_review(review_path)
+        court_boundary = None
+        if boundary_path is not None:
+            boundary_path = Path(boundary_path).expanduser().resolve()
+            if any(path is not None and _same_path(boundary_path, path) for path in (output_path, tracks_path, events_path)):
+                raise ValueError("--court-boundary must not refer to an output file")
+            court_boundary = load_court_boundary(boundary_path)
         args.events = events_path
         if args.max_frames is not None and args.max_frames < 0:
             raise ValueError("--max-frames must be non-negative")
@@ -377,12 +415,12 @@ class VideoAnalysisRunner:
         self._processing_cleanup = ExitStack()
         self._writer_cleanup = ExitStack()
         try:
-            self._initialize_runtime(args)
+            self._initialize_runtime(args, court_boundary)
         except BaseException:
             self.close()
             raise
 
-    def _initialize_runtime(self, args: Any) -> None:
+    def _initialize_runtime(self, args: Any, court_boundary: np.ndarray | None) -> None:
         detector = from_checkpoint(str(args.model))
         class_ids = resolve_detector_class_ids(detector)
         device = 0 if torch.cuda.is_available() else "cpu"
@@ -450,6 +488,7 @@ class VideoAnalysisRunner:
             player_pose=player_pose,
             court_pose=court_pose,
             court_mapper=court_mapper,
+            court_boundary=court_boundary,
             team_classifier=team_classifier,
             player_states={},
             verified_player_ids=set(),
@@ -650,6 +689,8 @@ class VideoAnalysisRunner:
                 player_box_colors=self.renderer.player_box_colors,
             ) if state.writer is not None else None,
             label_for_player=player_overlay_label,
+            identity_review=self.identity_review,
+            source_video=state.args.video,
         )
         event_count = write_event_list(state.args.tracks, state.args.events)
         print(f"event list: {state.args.events} ({event_count} events)")

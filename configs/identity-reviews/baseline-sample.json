@@ -1,0 +1,25 @@
+{
+  "frame_count": 549,
+  "edits": [
+    {
+      "id": 11,
+      "team": "dark",
+      "jersey_number": "10",
+      "segments": [
+        [2, 1, 70],
+        [3, 71, 84],
+        [2, 85, 87],
+        [3, 88, 137],
+        [28, 197, 275],
+        [8, 309, 375],
+        [39, 436, 549]
+      ]
+    },
+    {
+      "id": null,
+      "team": "light",
+      "jersey_number": null,
+      "segments": [[3, 138, 150]]
+    }
+  ]
+}

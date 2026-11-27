@@ -1,6 +1,7 @@
 """Resolve online jersey evidence and final number consensus for player identities."""
 
 from collections import Counter, defaultdict, deque
+from dataclasses import dataclass
 from typing import Any
 
 from reid.crops import crop_bounds_overlap, jersey_torso_crop
@@ -17,6 +18,16 @@ def jersey_conflict_timeout(parameters: dict[str, Any]) -> int:
     return 3 * min_span + sample_interval
 
 
+@dataclass(frozen=True)
+class JerseyConflict:
+    number: str
+    first_frame: int
+    support: int
+    confidence: float
+    purity: float
+    span: int
+
+
 class JerseyNumberSampler:
     """Collect and retain full-number and per-digit OCR predictions per local track."""
 
@@ -30,6 +41,13 @@ class JerseyNumberSampler:
     def reset_interval(self) -> None:
         """Allow immediate OCR sampling after a clip boundary while retaining prior evidence."""
         self.last_sample_frame.clear()
+
+    def resolve_conflicts(self, recovered: dict[int, int], frame_index: int) -> None:
+        """Allow finalized records to use the recovered identity from the first supported read."""
+        for local_id, first_frame in recovered.items():
+            self.identity_uncertain_refs.difference_update(
+                (frame, local_id) for frame in range(first_frame, frame_index + 1)
+            )
 
     def sample(
         self,
@@ -202,10 +220,10 @@ def update_jersey_votes(
     frame_index: int,
     samples: list[dict[str, Any]],
     visible_local_ids: set[int],
-) -> None:
-    """Update per-track online jersey votes and lock stable numbers."""
+) -> dict[int, JerseyConflict]:
+    """Lock stable numbers and return sustained contradictions for identity recovery."""
     if not samples:
-        return
+        return {}
     jersey_parameters = resolver.parameters.get("jersey_ocr", {})
     required = max(4, int(jersey_parameters.get("confirmations", 4)))
     purity_threshold = float(jersey_parameters.get("purity", 0.85))
@@ -219,6 +237,7 @@ def update_jersey_votes(
     candidate_change_span = max(12, 2 * sample_interval)
     candidate_change_purity = 0.75
     candidate_change_confidence = max(0.70, candidate_threshold)
+    confirmed_conflicts = {}
     for sample in samples:
         local_id = int(sample["local_id"])
         local_state = resolver.local_tracks[local_id]
@@ -237,35 +256,25 @@ def update_jersey_votes(
                 and frame_index - conflict_votes[0][0] > conflict_timeout
             ):
                 conflict_votes.popleft()
-            if (
-                is_jersey_conflict_prediction(
-                    local_state, prediction, jersey_parameters
-                )
-                and not local_state.jersey_conflict_confirmed
-            ):
-                if number != str(locked_number) or conflict_votes:
-                    conflict_votes.append((int(frame_index), number, confidence))
-                    candidate_votes = defaultdict(list)
-                    candidate_weights = defaultdict(float)
-                    for vote_frame, candidate, vote_confidence in conflict_votes:
-                        candidate_votes[candidate].append(vote_frame)
-                        candidate_weights[candidate] += vote_confidence
-                    candidate = max(candidate_weights, key=candidate_weights.get)
-                    frames = candidate_votes[candidate]
-                    support = len(frames)
-                    span = max(frames) - min(frames)
-                    total_weight = sum(candidate_weights.values())
-                    purity = candidate_weights[candidate] / max(1e-6, total_weight)
-                    if (
-                        support >= required
-                        and span >= min_span
-                        and purity >= max(0.85, purity_threshold)
-                    ):
-                        if candidate == str(locked_number):
-                            conflict_votes.clear()
-                        else:
-                            # Keep identity and number hidden after a stable conflict.
-                            local_state.jersey_conflict_confirmed = True
+            if number == str(locked_number) and confidence >= _conflict_confidence(jersey_parameters):
+                conflict_votes.clear()
+            elif is_jersey_conflict_prediction(local_state, prediction, jersey_parameters):
+                conflict_votes.append((int(frame_index), number, confidence))
+                candidate_votes = defaultdict(list)
+                candidate_weights = defaultdict(float)
+                for vote_frame, candidate, vote_confidence in conflict_votes:
+                    candidate_votes[candidate].append(vote_frame)
+                    candidate_weights[candidate] += vote_confidence
+                candidate = max(candidate_weights, key=candidate_weights.get)
+                frames = candidate_votes[candidate]
+                support = len(frames)
+                span = frames[-1] - frames[0]
+                weight = candidate_weights[candidate]
+                purity = weight / sum(candidate_weights.values())
+                if support >= required and span >= min_span and purity >= max(0.85, purity_threshold):
+                    confirmed_conflicts[local_id] = JerseyConflict(
+                        candidate, frames[0], support, weight / support, purity, span,
+                    )
             continue
         if (
             not number.isdigit()
@@ -345,11 +354,11 @@ def update_jersey_votes(
         )
         register_locked_jersey(resolver, local_id, winning_number, frame_index, visible_local_ids)
         local_state.jersey_votes.clear()
-
-
+    return confirmed_conflicts
 
 
 __all__ = [
+    "JerseyConflict",
     "JerseyNumberSampler",
     "get_locked_jersey_number",
     "get_trusted_jersey_key",

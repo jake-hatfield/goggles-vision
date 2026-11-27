@@ -180,6 +180,10 @@ class FrameEventProcessor:
             min_ocr_confidence = max(0.65, float(jersey_ocr.get("min_read_confidence", 0.55)))
             sample_interval_frames = int(jersey_ocr.get("sample_interval_frames", 1))
             confirmations = int(jersey_ocr.get("confirmations", 4))
+            court_eligibility = (
+                "configured court boundary" if self.state.court_boundary is not None
+                else "court projection or conservative screen zone"
+            )
             frame_record["run_config"] = {
                 "frame_time_origin": "frame_zero",
                 "shot_event_detector": self.state.event_pipeline.event_parameters.get("schema", "shot_tracker_fsm_v1"),
@@ -206,7 +210,7 @@ class FrameEventProcessor:
                     "matching_score": "multi-frame OSNet cosine similarity with team and locked jersey evidence",
                     "reid_crop": "pose-derived foreground mask with full-box fallback",
                     "reid_eligibility": (
-                        "verified player; referee excluded; court projection or conservative screen zone; "
+                        f"verified player; referee excluded; {court_eligibility}; "
                         "small crops require visible ankle keypoints"
                     ),
                     "reid_similarity_floor": float(
@@ -245,6 +249,8 @@ class FrameEventProcessor:
                     },
                 },
             }
+            if self.state.court_boundary is not None:
+                frame_record["run_config"]["court_boundary"] = self.state.court_boundary.astype(float).round(6).tolist()
         event_frame_record = dict(frame_record)
         event_frame_record["players"] = event_players
         event_frame_record["scorer_candidates"] = scorer_candidates

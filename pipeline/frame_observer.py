@@ -46,6 +46,7 @@ class FrameObserver:
                 self.state.frame_index,
                 frame_shape,
                 self.state.identity_resolver.parameters.get("fallback_crop_min_height_px", 100),
+                boundary=self.state.court_boundary,
             )
         }
         self.state.verified_player_ids.update(

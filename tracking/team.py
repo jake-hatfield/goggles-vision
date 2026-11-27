@@ -378,6 +378,20 @@ class JerseyTeamClassifier:
             return None
         return sample[1:]
 
+    def contradicts_team_at(self, track_id: int, frame_index: int, expected_team: int) -> bool:
+        """Check a fresh torso color against the learned teams without the track's vote history."""
+        profile = self.color_features_at(track_id, frame_index)
+        centers = self.identity_centers
+        if profile is None or centers is None or not self.team_colors_locked:
+            return False
+        separation = float(np.linalg.norm(centers[0] - centers[1]))
+        distances = np.linalg.norm(centers - profile, axis=1)
+        other_distance = distances[1 - expected_team]
+        return bool(
+            other_distance <= 0.65 * separation
+            and distances[expected_team] - other_distance >= 0.25 * separation
+        )
+
 
 def build_jersey_mask(
     frame_shape: tuple[int, ...],

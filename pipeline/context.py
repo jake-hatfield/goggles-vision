@@ -1,6 +1,8 @@
 from dataclasses import dataclass, field
 from typing import Any
 
+import numpy as np
+
 
 @dataclass
 class FrameContext:
@@ -98,3 +100,4 @@ class VideoAnalysisContext:
     frame_index: int
     detector_shape: Any
     frame_processing_elapsed: float
+    court_boundary: np.ndarray | None = None
