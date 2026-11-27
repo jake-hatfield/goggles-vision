@@ -47,9 +47,15 @@ def translate_event_identity_references(
                             and str(item) == str(local_id)
                             and (key == "player_id" or (key == "id" and parent_key == "scorer_tag"))
                         )
+                        if key == "player_id" and value.get("actor_frame") is not None:
+                            identity_frame = int(value["actor_frame"])
+                        elif key in ("receiver_id", "gained_by") and value.get("end_frame") is not None:
+                            identity_frame = int(value["end_frame"])
+                        else:
+                            identity_frame = local_frame if is_local_reference else reference_frame
                         translated[key] = resolver.get_global_id_at(
                             int(local_id if is_local_reference else item),
-                            local_frame if is_local_reference else reference_frame,
+                            identity_frame,
                         )
                     except (TypeError, ValueError):
                         translated[key] = None
