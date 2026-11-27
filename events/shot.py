@@ -123,6 +123,7 @@ class ShotOutcomeResolver:
             "result_source": result_source,
             "player_id": shot["player_id"],
             "local_track_id": shot.get("local_track_id"),
+            "actor_frame": int(shot["start_frame"]),
             "team": normalize_team(shot.get("team")) or event_team({"scorer_tag": scorer_tag}),
             "scorer_tag": scorer_tag,
         }
@@ -1098,6 +1099,8 @@ class ShotStateMachine:
                     "start_frame": int(self.dribble_top[0]),
                     "start": round(self.dribble_top[1], 4),
                     "player_id": self.dribble_holder["id"],
+                    "local_track_id": self.dribble_holder["id"],
+                    "actor_frame": int(self.dribble_top[0]),
                     "team": self.dribble_holder["team"],
                     "bounce_count": self.dribble_bounce_count,
                 }

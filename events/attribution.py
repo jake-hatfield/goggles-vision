@@ -238,6 +238,7 @@ def event_team_from_shooter_context(
             alternatives.sort(reverse=True)
             _, _, candidate_id, team = alternatives[0]
             event["player_id"] = candidate_id
+            event["local_track_id"] = candidate_id
             return team
 
     # Smooth a one-frame team flicker when the event player's own scorer detections
@@ -439,6 +440,7 @@ def refine_shot_attribution(
         context_team = event_team_from_shooter_context(event, context_history)
         if context_team in ("dark", "light"):
             event["team"] = context_team
+        player_id = event.get("player_id")
 
         # Resolve a local semantic inversion when a medium-bright, saturated
         # shooter jersey was labeled dark against a nearly black opposing kit.

@@ -133,7 +133,7 @@ Automatic identity stitching runs after inference. It uses repeated jersey reads
 
 Each JSONL frame record uses the `basketball_frame_v2` schema and includes the frame number, timestamp, players, holder, ball and rim features, raw detections, and events. The first record also contains the run configuration. Event records use frame intervals and include event-specific fields such as shot result and points, pass receiver, or rebound type.
 
-The compact event list includes frame/time intervals and available player and team information. Event-specific details are in `attrs`, including `bounce_count` for dribbles, `receiver_id` for passes, `rebound_type` and `shot_id` for rebounds, and `gained_by`, `gained_team`, and `cause` for turnovers. A rebound's `attrs.shot_id` refers to the preceding shot's `attrs.shot_id`.
+The compact event list includes frame/time intervals and available player and team information. When the actor is resolved, `actor_frame` identifies the observation used to assign the player. Shot attribution uses observed ball motion and contact near the release. It can report a physical shooter track without an identified jersey. `actor_team` describes that track, while `team` records the original event team used for scoring. A jersey number requires consistent locked reads near the action and a unique team and jersey match in those frames. Event-specific details are in `attrs`, including `bounce_count` for dribbles, `receiver_id` for passes, `rebound_type` and `shot_id` for rebounds, and `gained_by`, `gained_team`, and `cause` for turnovers. A rebound's `attrs.shot_id` refers to the preceding shot's `attrs.shot_id`.
 
 ## Project Structure
 

@@ -96,6 +96,8 @@ def remap_reviewed_references(value: dict | list, remaps: dict, frame: int) -> N
         for key, item in value.items():
             if key in ("player_id", "receiver_id", "gained_by", "holder_id", "turnover_player_id") and item is not None:
                 at = end if key in ("receiver_id", "gained_by") else start
+                if key == "player_id":
+                    at = value.get("actor_frame") or at
                 value[key] = remaps.get(at, {}).get(item, item)
             elif key != "players" and isinstance(item, (dict, list)):
                 remap_reviewed_references(item, remaps, end if key == "scorer_tag" else frame)
